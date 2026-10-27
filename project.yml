@@ -1,0 +1,86 @@
+name: VideoTool
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "16.0"
+
+settings:
+  base:
+    CODE_SIGNING_ALLOWED: "NO"
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGN_IDENTITY: ""
+
+targets:
+  # MP3 编码器（LAME，只编码不解码）
+  mp3lame:
+    type: library.static
+    platform: iOS
+    sources:
+      - path: Vendor/lame/libmp3lame
+        compilerFlags: ["-DHAVE_CONFIG_H"]
+        headerVisibility: project
+    settings:
+      base:
+        HEADER_SEARCH_PATHS: ["$(SRCROOT)/Vendor/lame/include", "$(SRCROOT)/Vendor/lame/libmp3lame"]
+        USE_HEADERMAP: "NO"
+        GCC_WARN_INHIBIT_ALL_WARNINGS: "YES"
+        SKIP_INSTALL: "YES"
+
+  # OGG Vorbis 编码器（libogg + libvorbis）
+  vorbis:
+    type: library.static
+    platform: iOS
+    sources:
+      - path: Vendor/ogg/src
+        headerVisibility: project
+      - path: Vendor/vorbis/lib
+        headerVisibility: project
+    settings:
+      base:
+        HEADER_SEARCH_PATHS: ["$(SRCROOT)/Vendor/ogg/include", "$(SRCROOT)/Vendor/vorbis/include"]
+        USE_HEADERMAP: "NO"
+        GCC_WARN_INHIBIT_ALL_WARNINGS: "YES"
+        SKIP_INSTALL: "YES"
+
+  VideoTool:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      - path: Codecs
+    dependencies:
+      - target: mp3lame
+      - target: vorbis
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: 剪辑转换
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        NSPhotoLibraryAddUsageDescription: 用于把剪好的视频保存到相册
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: 视频
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [public.movie]
+          - CFBundleTypeName: 音频
+            LSHandlerRank: Alternate
+            LSItemContentTypes: [public.audio]
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.videotool
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_OBJC_BRIDGING_HEADER: Codecs/VideoTool-Bridging-Header.h
+        HEADER_SEARCH_PATHS: ["$(SRCROOT)/Codecs", "$(SRCROOT)/Vendor/lame/include", "$(SRCROOT)/Vendor/ogg/include", "$(SRCROOT)/Vendor/vorbis/include"]
+        USE_HEADERMAP: "NO"
+
+schemes:
+  VideoTool:
+    build:
+      targets:
+        VideoTool: all
