@@ -31,6 +31,11 @@ struct LibraryView: View {
                     }
                 }
                 .contextMenu {
+                    Button {
+                        Clipboard.copyFile(url)
+                    } label: {
+                        Label("复制到剪贴板", systemImage: "doc.on.doc")
+                    }
                     ShareLink(item: url)
                     Button {
                         onEdit(url)
@@ -124,6 +129,11 @@ struct PlayerView: View {
                     } label: {
                         Image(systemName: "photo.badge.plus")
                     }
+                }
+                Button {
+                    message = Clipboard.copyFile(url) ? "已复制到剪贴板" : "复制失败"
+                } label: {
+                    Image(systemName: "doc.on.doc")
                 }
                 ShareLink(item: url)
             }

@@ -157,6 +157,41 @@ final class EditorModel: ObservableObject {
         load(movie.url)
     }
 
+    /// 剪贴板里的音频 / 视频（来自「粘贴」按钮）
+    func loadPasted(_ providers: [NSItemProvider]) {
+        guard let provider = providers.first,
+              let typeID = provider.registeredTypeIdentifiers.first(where: {
+                  UTType($0)?.conforms(to: .audiovisualContent) == true
+              }) else {
+            errorMessage = "剪贴板里没有音频或视频"
+            return
+        }
+        let ext = UTType(typeID)?.preferredFilenameExtension ?? "m4a"
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MMdd_HHmmss"
+        let name = "剪贴板_\(formatter.string(from: Date())).\(ext)"
+
+        errorMessage = nil
+        isLoading = true
+        _ = provider.loadDataRepresentation(forTypeIdentifier: typeID) { data, error in
+            Task { @MainActor in
+                guard let data, !data.isEmpty else {
+                    self.isLoading = false
+                    self.errorMessage = "读取剪贴板失败：\(error?.localizedDescription ?? "没有数据")"
+                    return
+                }
+                do {
+                    let target = try Self.makeImportURL(name: name)
+                    try data.write(to: target)
+                    self.load(target)
+                } catch {
+                    self.isLoading = false
+                    self.errorMessage = "读取剪贴板失败：\(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
     /// 载入一个已经在 App 里的文件
     func load(_ url: URL) {
         cancelExport()

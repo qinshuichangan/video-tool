@@ -55,6 +55,8 @@ targets:
       path: Sources/Info.plist
       properties:
         CFBundleDisplayName: 剪辑转换
+        CFBundleDevelopmentRegion: zh-Hans
+        CFBundleLocalizations: [zh-Hans]
         CFBundleShortVersionString: "1.0"
         CFBundleVersion: "1"
         UILaunchScreen: {}

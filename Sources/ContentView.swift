@@ -121,6 +121,16 @@ struct ContentView: View {
             } label: {
                 Label("从「文件」选视频或音频", systemImage: "folder")
             }
+            HStack {
+                Label("从剪贴板粘贴音频或视频", systemImage: "doc.on.clipboard")
+                    .foregroundStyle(.secondary)
+                Spacer()
+                PasteButton(supportedContentTypes: [.audiovisualContent]) { providers in
+                    Task { @MainActor in model.loadPasted(providers) }
+                }
+                .labelStyle(.titleOnly)
+                .buttonBorderShape(.capsule)
+            }
             if model.sourceURL != nil {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(model.sourceName).font(.callout).lineLimit(2)
@@ -304,6 +314,11 @@ struct ContentView: View {
             Label(url.lastPathComponent, systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green)
             Text(LibraryView.sizeText(url)).font(.caption).foregroundStyle(.secondary)
+            Button {
+                photoMessage = Clipboard.copyFile(url) ? "已复制到剪贴板，可以去别的 App 粘贴" : "复制失败"
+            } label: {
+                Label("复制到剪贴板", systemImage: "doc.on.doc")
+            }
             ShareLink(item: url) {
                 Label("分享 / 存到其他 App", systemImage: "square.and.arrow.up")
             }
