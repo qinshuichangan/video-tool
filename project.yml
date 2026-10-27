@@ -37,7 +37,7 @@ targets:
         headerVisibility: project
     settings:
       base:
-        HEADER_SEARCH_PATHS: ["$(SRCROOT)/Vendor/ogg/include", "$(SRCROOT)/Vendor/vorbis/include"]
+        HEADER_SEARCH_PATHS: ["$(SRCROOT)/Vendor/ogg/include", "$(SRCROOT)/Vendor/vorbis/include", "$(SRCROOT)/Vendor/vorbis/lib"]
         USE_HEADERMAP: "NO"
         GCC_WARN_INHIBIT_ALL_WARNINGS: "YES"
         SKIP_INSTALL: "YES"
