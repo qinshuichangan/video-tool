@@ -57,12 +57,16 @@ targets:
         CFBundleDisplayName: 剪辑转换
         CFBundleDevelopmentRegion: zh-Hans
         CFBundleLocalizations: [zh-Hans]
-        CFBundleShortVersionString: "1.21"
-        CFBundleVersion: "4"
+        CFBundleShortVersionString: "1.31"
+        CFBundleVersion: "5"
         UILaunchScreen: {}
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         NSPhotoLibraryAddUsageDescription: 用于把剪好的视频保存到相册
+        # iOS 26 起切到后台也能继续处理（系统的「继续处理」任务）
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.example.videotool.export.*
+        UIBackgroundModes: [processing]
         CFBundleDocumentTypes:
           - CFBundleTypeName: 视频
             LSHandlerRank: Alternate

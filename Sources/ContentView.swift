@@ -6,22 +6,17 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @StateObject private var model = EditorModel()
     @AppStorage(EditorModel.formatKey) private var format: OutputFormat = .video
-    @AppStorage(EditorModel.bitrateKey) private var bitrate = 192
-    @AppStorage(EditorModel.preciseKey) private var precise = false
-    @AppStorage(EditorModel.compressSideKey) private var compressSide = 720
-    @AppStorage(EditorModel.compressFPSKey) private var compressFPS = 30
-    @AppStorage(EditorModel.compressBitrateKey) private var compressBitrate = 3.0
-    @AppStorage(EditorModel.compressHEVCKey) private var compressHEVC = true
-    @AppStorage(EditorModel.compressModeKey) private var compressMode: CompressMode = .lecture
-    @AppStorage(EditorModel.compressTargetKey) private var targetMB = 30.0
+    @StateObject private var batch = BatchModel()
 
     @State private var photoItem: PhotosPickerItem?
     @State private var showFileImporter = false
     @State private var showLibrary = false
+    @State private var showBatch = false
     @State private var photoMessage: String?
     @FocusState private var focusedField: Field?
+    @FocusState private var targetFocused: Bool
 
-    enum Field { case start, end, target }
+    enum Field { case start, end }
 
     var body: some View {
         NavigationStack {
@@ -40,7 +35,10 @@ struct ContentView: View {
                 if model.sourceURL != nil {
                     playerSection
                     rangeSection
-                    outputSection
+                    OutputSettingsSection(header: "3. 输出", allowVideo: model.hasVideo,
+                                          source: model.sourceVideo, seconds: model.selectedLength,
+                                          targetFocus: $targetFocused)
+                        .disabled(model.isExporting)
                     exportSection
                 }
 
@@ -65,6 +63,14 @@ struct ContentView: View {
             }
             .navigationTitle("剪辑转换")
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        showBatch = true
+                    } label: {
+                        Label("批量", systemImage: "list.bullet.rectangle")
+                            .labelStyle(.titleAndIcon)
+                    }
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         showLibrary = true
@@ -74,7 +80,10 @@ struct ContentView: View {
                 }
                 ToolbarItemGroup(placement: .keyboard) {
                     Spacer()
-                    Button("完成") { focusedField = nil }
+                    Button("完成") {
+                        focusedField = nil
+                        targetFocused = false
+                    }
                 }
             }
             .navigationDestination(isPresented: $showLibrary) {
@@ -82,6 +91,9 @@ struct ContentView: View {
                     showLibrary = false
                     model.load(url)
                 }
+            }
+            .navigationDestination(isPresented: $showBatch) {
+                BatchView(batch: batch, editorBusy: model.isExporting)
             }
         }
         .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.audiovisualContent]) { result in
@@ -246,168 +258,6 @@ struct ContentView: View {
         .buttonStyle(.borderless)
     }
 
-    // MARK: - 输出格式
-
-    private var availableFormats: [OutputFormat] {
-        OutputFormat.allCases.filter { !$0.isVideo || model.hasVideo }
-    }
-
-    private var outputSection: some View {
-        Section {
-            Picker("格式", selection: $format) {
-                ForEach(availableFormats) { f in
-                    Text(f.label).tag(f)
-                }
-            }
-            if format == .video {
-                Toggle("精确剪切（重新编码）", isOn: $precise)
-            } else if format == .compressed {
-                compressControls
-            } else {
-                Picker("音质（码率）", selection: $bitrate) {
-                    ForEach(Exporter.bitrates, id: \.self) { b in
-                        Text("\(b) kbps").tag(b)
-                    }
-                }
-            }
-        } header: {
-            Text("3. 输出")
-        } footer: {
-            if format == .video {
-                Text(precise
-                     ? "重新编码：切点精确到帧，但比较慢，画质会有一点点损失。"
-                     : "不重新编码：很快、画质无损。开头可能会从最近的关键帧开始，有零点几秒的误差，介意的话打开「精确剪切」。")
-            } else if format == .compressed {
-                Text(compressFooter)
-            } else if format == .ogg {
-                Text("OGG 用的是可变码率，选的数值是大概的平均码率。iPhone 自带的播放器不能播 OGG。")
-            } else if format == .aac {
-                Text(".aac 是不带封装的纯 AAC，兼容性比 .m4a 稍差；不确定就选 .m4a。")
-            } else {
-                Text("192 kbps 一般就够用了，听音乐想要更好可以选 256 或 320。")
-            }
-        }
-        .disabled(model.isExporting)
-    }
-
-    private var compressControls: some View {
-        Group {
-            Picker("压缩方式", selection: $compressMode) {
-                ForEach(CompressMode.allCases) { mode in
-                    Text(mode.label).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            switch compressMode {
-            case .lecture:
-                planSummary
-            case .target:
-                HStack {
-                    Text("目标大小")
-                    Spacer()
-                    TextField("30", value: $targetMB, format: .number)
-                        .keyboardType(.decimalPad)
-                        .multilineTextAlignment(.trailing)
-                        .monospacedDigit()
-                        .frame(width: 90)
-                        .focused($focusedField, equals: .target)
-                    Text("MB")
-                }
-                planSummary
-                if let warning = targetPlan?.warning {
-                    Text(warning).font(.caption).foregroundStyle(.red)
-                }
-            case .manual:
-                manualControls
-            }
-        }
-    }
-
-    /// 自动算出来的设置 + 预计大小
-    private var planSummary: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if model.sourceVideo == nil {
-                Text("读不出原视频的信息，自动模式用不了，请用「手动」。")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            } else {
-                Text("自动设置：\(compressSettings.summary(for: model.sourceVideo))")
-                    .font(.caption)
-                estimateText
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var estimateText: some View {
-        if let length = model.selectedLength {
-            Text(String(format: "预计大小约 %.1f MB", compressSettings.estimatedMB(seconds: length)))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private var manualControls: some View {
-        Group {
-            Picker("分辨率", selection: $compressSide) {
-                ForEach(CompressSettings.resolutions, id: \.value) { item in
-                    Text(item.label).tag(item.value)
-                }
-            }
-            Picker("帧率", selection: $compressFPS) {
-                ForEach(CompressSettings.frameRates, id: \.value) { item in
-                    Text(item.label).tag(item.value)
-                }
-            }
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("码率")
-                    Spacer()
-                    Text(String(format: "%.1f Mbps", compressBitrate))
-                        .monospacedDigit()
-                        .foregroundStyle(.secondary)
-                }
-                Slider(value: $compressBitrate, in: CompressSettings.bitrateRange, step: 0.1)
-                estimateText
-            }
-            Toggle("HEVC 编码（体积更小）", isOn: $compressHEVC)
-        }
-    }
-
-    private var targetPlan: (settings: CompressSettings, warning: String?)? {
-        guard let source = model.sourceVideo, let length = model.selectedLength else { return nil }
-        return CompressSettings.forTarget(megabytes: max(targetMB, 1), seconds: length, source: source)
-    }
-
-    private var manualSettings: CompressSettings {
-        CompressSettings(shortSide: compressSide, fps: compressFPS,
-                         bitrateMbps: compressBitrate, hevc: compressHEVC)
-    }
-
-    private var compressSettings: CompressSettings {
-        switch compressMode {
-        case .lecture:
-            if let source = model.sourceVideo { return CompressSettings.lecture(source: source) }
-        case .target:
-            if let plan = targetPlan { return plan.settings }
-        case .manual:
-            break
-        }
-        return manualSettings
-    }
-
-    private var compressFooter: String {
-        switch compressMode {
-        case .lecture:
-            return "专门压给 Claude 看的网课：480p、每秒 1 帧、单声道 32 kbps 人声，一小时大约 60 MB。画面会一卡一卡的，但幻灯片和板书的字、老师讲的话都够 Claude 看清听清。原视频本身就很小、字很小或者黑板拍得很远的话，换「目标大小」给多一点空间。"
-        case .target:
-            return "输入想要的文件大小，自动算码率，再挑这个码率下最清楚的分辨率和帧率。只压缩选中的那一段时，按那一段的长度算。实际大小可能有一点点误差。"
-        case .manual:
-            return "分辨率和帧率只会降低、不会比原视频高。码率参考：1080p 约 4–8 Mbps，720p 约 2–4 Mbps，480p 约 1–2 Mbps，太低会有马赛克。HEVC 体积更小；要发给旧手机或 Windows 电脑就关掉，用 H.264。HDR 视频会转成普通画面。"
-        }
-    }
-
     // MARK: - 导出
 
     private var exportSection: some View {
@@ -425,18 +275,25 @@ struct ContentView: View {
             } else {
                 Button {
                     focusedField = nil
+                    targetFocused = false
                     photoMessage = nil
-                    let f = availableFormats.contains(format) ? format : .mp3
-                    model.export(format: f, bitrate: bitrate, precise: precise, compress: compressSettings)
+                    let choice = OutputChoice.current()
+                    model.export(format: choice.format(hasVideo: model.hasVideo),
+                                 bitrate: choice.audioBitrate, precise: choice.precise,
+                                 compress: choice.compressSettings(source: model.sourceVideo,
+                                                                   seconds: model.selectedLength))
                 } label: {
                     Label(exportTitle, systemImage: exportIcon)
                         .frame(maxWidth: .infinity)
                 }
-                .disabled(model.rangeProblem != nil)
+                .disabled(model.rangeProblem != nil || batch.isRunning)
             }
+            DimToggle()
         } footer: {
-            if model.isExporting {
-                Text("处理中请留在这个 App 里。")
+            if batch.isRunning {
+                Text("批量处理正在进行，等它结束后再导出。")
+            } else if model.isExporting {
+                Text("可以切到别的 App：系统允许的话会在后台继续，锁屏和灵动岛上能看到进度。万一被系统中断，回来重新开始就行。")
             }
         }
     }

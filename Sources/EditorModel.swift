@@ -142,9 +142,9 @@ final class EditorModel: ObservableObject {
     }
 
     /// 在临时文件夹里准备一个不重名的位置（nonisolated：相册导入时在后台调用）
-    nonisolated static func makeImportURL(name: String) throws -> URL {
+    nonisolated static func makeImportURL(name: String, folder base: String = "Imported") throws -> URL {
         let folder = FileManager.default.temporaryDirectory
-            .appendingPathComponent("Imported", isDirectory: true)
+            .appendingPathComponent(base, isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         return folder.appendingPathComponent(name.isEmpty ? "video.mov" : name)
@@ -245,7 +245,7 @@ final class EditorModel: ObservableObject {
     }
 
     /// 原视频的分辨率、帧率、码率、文件大小
-    private static func describeVideo(_ track: AVAssetTrack?,
+    static func describeVideo(_ track: AVAssetTrack?,
                                       file: URL) async -> (text: String, video: SourceVideo?) {
         guard let track,
               let info = try? await track.load(
@@ -310,7 +310,10 @@ final class EditorModel: ObservableObject {
 
         let report: @Sendable (Double) -> Void = { [weak self] value in
             guard let self else { return }
-            Task { @MainActor in self.progress = value }
+            Task { @MainActor in
+                self.progress = value
+                WorkSession.shared.update(progress: value)
+            }
         }
         let task = Task.detached(priority: .userInitiated) { () async throws -> URL in
             switch format {
@@ -327,15 +330,27 @@ final class EditorModel: ObservableObject {
         }
         exportTask = task
 
+        let backgroundMark = WorkSession.shared.backgroundCount
+        WorkSession.shared.begin(title: "剪辑转换：\(sourceName)") { [weak self] in
+            self?.cancelExport()
+        }
+
         Task {
+            var success = false
             do {
                 let url = try await task.value
                 resultURL = url
+                success = true
             } catch is CancellationError {
-                errorMessage = "已取消"
+                errorMessage = WorkSession.shared.backgroundCount != backgroundMark
+                    ? "在后台被系统停止了，请重新开始"
+                    : "已取消"
             } catch {
-                errorMessage = error.localizedDescription
+                errorMessage = WorkSession.shared.backgroundCount != backgroundMark
+                    ? "切到后台时被系统中断了，请留在 App 里重新开始（\(error.localizedDescription)）"
+                    : error.localizedDescription
             }
+            WorkSession.shared.end(success: success)
             isExporting = false
             exportTask = nil
         }
