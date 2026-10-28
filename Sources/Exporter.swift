@@ -58,7 +58,7 @@ enum CompressMode: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .lecture: return "网课极限"
+        case .lecture: return "网课(给AI)"
         case .target: return "目标大小"
         case .manual: return "手动"
         }
@@ -74,6 +74,7 @@ struct CompressSettings: Sendable {
     var audioKbps = 0         // 声音码率，0 = 自动（立体声 128 / 单声道 96）
     var monoAudio = false     // 声音混成单声道（讲课的人声足够）
     var keyframeSeconds = 2   // 关键帧间隔；画面变化少的网课拉长能再省一些
+    var speechAudio = false   // 声音按人声处理：22.05 kHz 采样（语音识别只用到 16 kHz，够用）
 
     struct Option: Hashable, Sendable {
         let value: Int
@@ -90,8 +91,8 @@ struct CompressSettings: Sendable {
     ]
     static let bitrateRange: ClosedRange<Double> = 0.3...20
 
-    /// 网课用的声音：单声道 48 kbps，人声听得清楚
-    static let speechAudioKbps = 48
+    /// 网课用的声音：单声道 32 kbps、22.05 kHz。实测 16 kbps 都能完整转成文字，留一倍余量应对教室杂音
+    static let speechAudioKbps = 32
 
     /// 实际用的声音码率（kbps），估算大小用
     var effectiveAudioKbps: Int {
@@ -122,19 +123,19 @@ struct CompressSettings: Sendable {
 
     // MARK: 自动计算
 
-    /// 每个像素每帧大概要多少 bit 才不会糊。网课画面（幻灯片、板书）变化少，HEVC 下 0.035 左右字还看得清
-    private static let lectureBitsPerPixel = 0.035
-
-    /// 网课极限：720p（原视频更小就不动）、10 fps、按画面大小自动算码率、单声道 48 kbps
+    /// 网课极限（给 AI 看）：480p、1 fps、约 0.1 Mbps、单声道 32 kbps。
+    /// 实测 480p 下幻灯片上很小的注释文字也能看清；AI 是隔一段截一张图来看，所以 1 fps 就够了。
+    /// 自己看会一卡一卡的，但体积大约只有一小时 60 MB。
     static func lecture(source: SourceVideo) -> CompressSettings {
-        let side = min(720, source.shortSide)
-        let fps = min(10, source.fpsInt)
+        let side = min(480, source.shortSide)
+        let fps = min(1, source.fpsInt)
         let size = source.outputSize(shortSide: side)
-        var mbps = Double(size.width * size.height * fps) * lectureBitsPerPixel / 1_000_000
-        mbps = min(max(mbps, 0.1), 1.0)
+        var mbps = 0.1 * Double(size.width * size.height) / Double(854 * 480)
+        mbps = min(max(mbps, 0.05), 0.15)
         if source.bitrateMbps > 0 { mbps = min(mbps, source.bitrateMbps) }
         return CompressSettings(shortSide: side, fps: fps, bitrateMbps: (mbps * 100).rounded() / 100,
-                                hevc: true, audioKbps: speechAudioKbps, monoAudio: true, keyframeSeconds: 10)
+                                hevc: true, audioKbps: speechAudioKbps, monoAudio: true,
+                                keyframeSeconds: 10, speechAudio: true)
     }
 
     /// 指定目标大小：先算出能用的码率，再挑一个这个码率下字还看得清的分辨率和帧率。
@@ -175,7 +176,7 @@ struct CompressSettings: Sendable {
         let settings = CompressSettings(shortSide: side, fps: fps,
                                         bitrateMbps: (videoKbps / 10).rounded() / 100,
                                         hevc: true, audioKbps: speechAudioKbps, monoAudio: true,
-                                        keyframeSeconds: 10)
+                                        keyframeSeconds: 10, speechAudio: true)
         return (settings, warning)
     }
 }
@@ -327,7 +328,8 @@ enum Exporter {
                 sourceRate = asbd.mSampleRate
             }
             let channels = (sourceChannels == 1 || s.monoAudio) ? 1 : 2
-            let sampleRate = (sourceRate == 48000 || sourceRate == 44100) ? sourceRate : 44100
+            let sampleRate = s.speechAudio ? 22050
+                : (sourceRate == 48000 || sourceRate == 44100) ? sourceRate : 44100
             var layout = AudioChannelLayout()
             layout.mChannelLayoutTag = channels == 1 ? kAudioChannelLayoutTag_Mono : kAudioChannelLayoutTag_Stereo
             let layoutData = Data(bytes: &layout, count: MemoryLayout<AudioChannelLayout>.size)

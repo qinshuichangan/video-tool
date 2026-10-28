@@ -400,7 +400,7 @@ struct ContentView: View {
     private var compressFooter: String {
         switch compressMode {
         case .lecture:
-            return "适合网课、讲座这种画面变化少的视频：自动把分辨率降到 720p、帧率降到 10 fps，按画面大小算出最低还能看清字的码率，声音变成单声道 48 kbps（人声足够清楚）。动作多的视频会比较糊，那种请用「手动」。"
+            return "专门压给 Claude 看的网课：480p、每秒 1 帧、单声道 32 kbps 人声，一小时大约 60 MB。画面会一卡一卡的，但幻灯片和板书的字、老师讲的话都够 Claude 看清听清。原视频本身就很小、字很小或者黑板拍得很远的话，换「目标大小」给多一点空间。"
         case .target:
             return "输入想要的文件大小，自动算码率，再挑这个码率下最清楚的分辨率和帧率。只压缩选中的那一段时，按那一段的长度算。实际大小可能有一点点误差。"
         case .manual:
