@@ -27,6 +27,8 @@ final class EditorModel: ObservableObject {
     static let compressFPSKey = "compressFPS"
     static let compressBitrateKey = "compressBitrate"
     static let compressHEVCKey = "compressHEVC"
+    static let compressModeKey = "compressMode"
+    static let compressTargetKey = "compressTargetMB"
 
     // 已载入的文件
     @Published private(set) var sourceURL: URL?
@@ -36,6 +38,8 @@ final class EditorModel: ObservableObject {
     @Published private(set) var hasAudio = false
     /// 原视频信息，例：「1920×1080 · 30 fps · 码率 15.2 Mbps · 85.3 MB」
     @Published private(set) var videoInfo = ""
+    /// 原视频的宽高、帧率、码率（自动计算压缩设置用）
+    @Published private(set) var sourceVideo: SourceVideo?
     @Published private(set) var isLoading = false
 
     // 截取范围（文字输入）
@@ -228,7 +232,9 @@ final class EditorModel: ObservableObject {
                 duration = length
                 hasVideo = !videoTracks.isEmpty
                 hasAudio = !audioTracks.isEmpty
-                videoInfo = await Self.describeVideo(videoTracks.first, file: url)
+                let meta = await Self.describeVideo(videoTracks.first, file: url)
+                videoInfo = meta.text
+                sourceVideo = meta.video
                 currentTime = 0
                 resetRange()
                 player.replaceCurrentItem(with: AVPlayerItem(asset: asset))
@@ -239,18 +245,25 @@ final class EditorModel: ObservableObject {
     }
 
     /// 原视频的分辨率、帧率、码率、文件大小
-    private static func describeVideo(_ track: AVAssetTrack?, file: URL) async -> String {
+    private static func describeVideo(_ track: AVAssetTrack?,
+                                      file: URL) async -> (text: String, video: SourceVideo?) {
         guard let track,
               let info = try? await track.load(
                 .naturalSize, .preferredTransform, .nominalFrameRate, .estimatedDataRate)
-        else { return "" }
+        else { return ("", nil) }
         let (size, transform, fps, rate) = info
         let rect = CGRect(origin: .zero, size: size).applying(transform)
-        var parts = ["\(Int(abs(rect.width).rounded()))×\(Int(abs(rect.height).rounded()))"]
+        let width = Int(abs(rect.width).rounded())
+        let height = Int(abs(rect.height).rounded())
+        let mbps = Double(rate) / 1_000_000
+        var parts = ["\(width)×\(height)"]
         if fps > 0 { parts.append("\(Int(fps.rounded())) fps") }
-        if rate > 0 { parts.append(String(format: "码率 %.1f Mbps", Double(rate) / 1_000_000)) }
+        if rate > 0 { parts.append(String(format: "码率 %.1f Mbps", mbps)) }
         parts.append(LibraryView.sizeText(file))
-        return parts.joined(separator: " · ")
+        let video = width > 0 && height > 0
+            ? SourceVideo(width: width, height: height, fps: Double(fps), bitrateMbps: mbps)
+            : nil
+        return (parts.joined(separator: " · "), video)
     }
 
     /// 删掉以前导入的临时文件（正在用的那个除外）

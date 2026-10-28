@@ -12,6 +12,8 @@ struct ContentView: View {
     @AppStorage(EditorModel.compressFPSKey) private var compressFPS = 30
     @AppStorage(EditorModel.compressBitrateKey) private var compressBitrate = 3.0
     @AppStorage(EditorModel.compressHEVCKey) private var compressHEVC = true
+    @AppStorage(EditorModel.compressModeKey) private var compressMode: CompressMode = .lecture
+    @AppStorage(EditorModel.compressTargetKey) private var targetMB = 30.0
 
     @State private var photoItem: PhotosPickerItem?
     @State private var showFileImporter = false
@@ -19,7 +21,7 @@ struct ContentView: View {
     @State private var photoMessage: String?
     @FocusState private var focusedField: Field?
 
-    enum Field { case start, end }
+    enum Field { case start, end, target }
 
     var body: some View {
         NavigationStack {
@@ -276,7 +278,7 @@ struct ContentView: View {
                      ? "重新编码：切点精确到帧，但比较慢，画质会有一点点损失。"
                      : "不重新编码：很快、画质无损。开头可能会从最近的关键帧开始，有零点几秒的误差，介意的话打开「精确剪切」。")
             } else if format == .compressed {
-                Text("分辨率和帧率只会降低、不会比原视频高。码率参考：1080p 约 4–8 Mbps，720p 约 2–4 Mbps，480p 约 1–2 Mbps，太低会有马赛克。HEVC 体积更小；要发给旧手机或 Windows 电脑就关掉，用 H.264。HDR 视频会转成普通画面。")
+                Text(compressFooter)
             } else if format == .ogg {
                 Text("OGG 用的是可变码率，选的数值是大概的平均码率。iPhone 自带的播放器不能播 OGG。")
             } else if format == .aac {
@@ -289,6 +291,64 @@ struct ContentView: View {
     }
 
     private var compressControls: some View {
+        Group {
+            Picker("压缩方式", selection: $compressMode) {
+                ForEach(CompressMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            switch compressMode {
+            case .lecture:
+                planSummary
+            case .target:
+                HStack {
+                    Text("目标大小")
+                    Spacer()
+                    TextField("30", value: $targetMB, format: .number)
+                        .keyboardType(.decimalPad)
+                        .multilineTextAlignment(.trailing)
+                        .monospacedDigit()
+                        .frame(width: 90)
+                        .focused($focusedField, equals: .target)
+                    Text("MB")
+                }
+                planSummary
+                if let warning = targetPlan?.warning {
+                    Text(warning).font(.caption).foregroundStyle(.red)
+                }
+            case .manual:
+                manualControls
+            }
+        }
+    }
+
+    /// 自动算出来的设置 + 预计大小
+    private var planSummary: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if model.sourceVideo == nil {
+                Text("读不出原视频的信息，自动模式用不了，请用「手动」。")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            } else {
+                Text("自动设置：\(compressSettings.summary(for: model.sourceVideo))")
+                    .font(.caption)
+                estimateText
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var estimateText: some View {
+        if let length = model.selectedLength {
+            Text(String(format: "预计大小约 %.1f MB", compressSettings.estimatedMB(seconds: length)))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var manualControls: some View {
         Group {
             Picker("分辨率", selection: $compressSide) {
                 ForEach(CompressSettings.resolutions, id: \.value) { item in
@@ -309,20 +369,43 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                 }
                 Slider(value: $compressBitrate, in: CompressSettings.bitrateRange, step: 0.1)
-                if let length = model.selectedLength {
-                    Text(String(format: "预计大小约 %.1f MB",
-                                CompressSettings.estimatedMB(seconds: length, bitrateMbps: compressBitrate)))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                estimateText
             }
             Toggle("HEVC 编码（体积更小）", isOn: $compressHEVC)
         }
     }
 
-    private var compressSettings: CompressSettings {
+    private var targetPlan: (settings: CompressSettings, warning: String?)? {
+        guard let source = model.sourceVideo, let length = model.selectedLength else { return nil }
+        return CompressSettings.forTarget(megabytes: max(targetMB, 1), seconds: length, source: source)
+    }
+
+    private var manualSettings: CompressSettings {
         CompressSettings(shortSide: compressSide, fps: compressFPS,
                          bitrateMbps: compressBitrate, hevc: compressHEVC)
+    }
+
+    private var compressSettings: CompressSettings {
+        switch compressMode {
+        case .lecture:
+            if let source = model.sourceVideo { return CompressSettings.lecture(source: source) }
+        case .target:
+            if let plan = targetPlan { return plan.settings }
+        case .manual:
+            break
+        }
+        return manualSettings
+    }
+
+    private var compressFooter: String {
+        switch compressMode {
+        case .lecture:
+            return "适合网课、讲座这种画面变化少的视频：自动把分辨率降到 720p、帧率降到 10 fps，按画面大小算出最低还能看清字的码率，声音变成单声道 48 kbps（人声足够清楚）。动作多的视频会比较糊，那种请用「手动」。"
+        case .target:
+            return "输入想要的文件大小，自动算码率，再挑这个码率下最清楚的分辨率和帧率。只压缩选中的那一段时，按那一段的长度算。实际大小可能有一点点误差。"
+        case .manual:
+            return "分辨率和帧率只会降低、不会比原视频高。码率参考：1080p 约 4–8 Mbps，720p 约 2–4 Mbps，480p 约 1–2 Mbps，太低会有马赛克。HEVC 体积更小；要发给旧手机或 Windows 电脑就关掉，用 H.264。HDR 视频会转成普通画面。"
+        }
     }
 
     // MARK: - 导出

@@ -32,12 +32,48 @@ enum OutputFormat: String, CaseIterable, Identifiable {
     var isAudio: Bool { !isVideo }
 }
 
+/// 原视频的基本信息（宽高是转正方向后的）
+struct SourceVideo: Sendable, Equatable {
+    let width: Int
+    let height: Int
+    let fps: Double
+    let bitrateMbps: Double
+
+    var shortSide: Int { min(width, height) }
+    var fpsInt: Int { fps > 0 ? Int(fps.rounded()) : 30 }
+
+    /// 按短边缩小后的宽高（只缩小不放大，取偶数）
+    func outputSize(shortSide target: Int) -> (width: Int, height: Int) {
+        let scale = target > 0 ? min(1, Double(target) / Double(max(shortSide, 1))) : 1
+        return (max(2, Int((Double(width) * scale / 2).rounded()) * 2),
+                max(2, Int((Double(height) * scale / 2).rounded()) * 2))
+    }
+}
+
+/// 压缩方式
+enum CompressMode: String, CaseIterable, Identifiable {
+    case lecture, target, manual
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .lecture: return "网课极限"
+        case .target: return "目标大小"
+        case .manual: return "手动"
+        }
+    }
+}
+
 /// 压缩视频的设置
 struct CompressSettings: Sendable {
     var shortSide: Int        // 分辨率（按短边算），0 = 原始
     var fps: Int              // 帧率，0 = 原始
     var bitrateMbps: Double   // 视频码率
     var hevc: Bool            // true = HEVC（更小），false = H.264（兼容性好）
+    var audioKbps = 0         // 声音码率，0 = 自动（立体声 128 / 单声道 96）
+    var monoAudio = false     // 声音混成单声道（讲课的人声足够）
+    var keyframeSeconds = 2   // 关键帧间隔；画面变化少的网课拉长能再省一些
 
     struct Option: Hashable, Sendable {
         let value: Int
@@ -54,9 +90,93 @@ struct CompressSettings: Sendable {
     ]
     static let bitrateRange: ClosedRange<Double> = 0.3...20
 
-    /// 预计文件大小（MB），声音按 128 kbps 算
-    static func estimatedMB(seconds: Double, bitrateMbps: Double) -> Double {
-        (bitrateMbps + 0.128) * seconds / 8
+    /// 网课用的声音：单声道 48 kbps，人声听得清楚
+    static let speechAudioKbps = 48
+
+    /// 实际用的声音码率（kbps），估算大小用
+    var effectiveAudioKbps: Int {
+        audioKbps > 0 ? audioKbps : (monoAudio ? 96 : 128)
+    }
+
+    /// 预计文件大小（MB）
+    func estimatedMB(seconds: Double) -> Double {
+        (bitrateMbps + Double(effectiveAudioKbps) / 1000) * seconds / 8
+    }
+
+    /// 例：「720p · 10 fps · 0.32 Mbps · HEVC · 单声道 48 kbps」
+    func summary(for source: SourceVideo?) -> String {
+        var parts: [String] = []
+        if let source {
+            let size = source.outputSize(shortSide: shortSide)
+            parts.append("\(min(size.width, size.height))p")
+            parts.append("\(fps > 0 ? min(fps, source.fpsInt) : source.fpsInt) fps")
+        } else {
+            parts.append(shortSide > 0 ? "\(shortSide)p" : "原始分辨率")
+            parts.append(fps > 0 ? "\(fps) fps" : "原始帧率")
+        }
+        parts.append(String(format: "%.2f Mbps", bitrateMbps))
+        parts.append(hevc ? "HEVC" : "H.264")
+        parts.append("\(monoAudio ? "单声道" : "立体声") \(effectiveAudioKbps) kbps")
+        return parts.joined(separator: " · ")
+    }
+
+    // MARK: 自动计算
+
+    /// 每个像素每帧大概要多少 bit 才不会糊。网课画面（幻灯片、板书）变化少，HEVC 下 0.035 左右字还看得清
+    private static let lectureBitsPerPixel = 0.035
+
+    /// 网课极限：720p（原视频更小就不动）、10 fps、按画面大小自动算码率、单声道 48 kbps
+    static func lecture(source: SourceVideo) -> CompressSettings {
+        let side = min(720, source.shortSide)
+        let fps = min(10, source.fpsInt)
+        let size = source.outputSize(shortSide: side)
+        var mbps = Double(size.width * size.height * fps) * lectureBitsPerPixel / 1_000_000
+        mbps = min(max(mbps, 0.1), 1.0)
+        if source.bitrateMbps > 0 { mbps = min(mbps, source.bitrateMbps) }
+        return CompressSettings(shortSide: side, fps: fps, bitrateMbps: (mbps * 100).rounded() / 100,
+                                hevc: true, audioKbps: speechAudioKbps, monoAudio: true, keyframeSeconds: 10)
+    }
+
+    /// 指定目标大小：先算出能用的码率，再挑一个这个码率下字还看得清的分辨率和帧率。
+    /// 返回设置，以及（目标太小时的）提示。
+    static func forTarget(megabytes: Double, seconds: Double,
+                          source: SourceVideo) -> (settings: CompressSettings, warning: String?) {
+        let audio = Double(speechAudioKbps)
+        // 留 5% 余量（文件头、码率波动）
+        let totalKbps = megabytes * 8 * 1000 / max(seconds, 1) * 0.95
+        var videoKbps = totalKbps - audio
+        if source.bitrateMbps > 0 { videoKbps = min(videoKbps, source.bitrateMbps * 1000) }
+
+        // 从清楚到模糊依次试，挑第一个码率够用的
+        let ladder: [(side: Int, fps: Int)] = [
+            (1080, 15), (720, 15), (720, 10), (540, 10), (480, 8), (360, 6), (240, 5),
+        ]
+        var choice = ladder[ladder.count - 1]
+        for step in ladder {
+            let side = min(step.side, source.shortSide)
+            let fps = min(step.fps, source.fpsInt)
+            let size = source.outputSize(shortSide: side)
+            let bpp = videoKbps * 1000 / Double(size.width * size.height * fps)
+            if bpp >= 0.04 {
+                choice = (side, fps)
+                break
+            }
+        }
+        let side = min(choice.side, source.shortSide)
+        let fps = min(choice.fps, source.fpsInt)
+
+        let minVideoKbps = 40.0
+        var warning: String?
+        if videoKbps < minVideoKbps {
+            let minMB = (minVideoKbps + audio) * max(seconds, 1) / 8 / 1000 / 0.95
+            warning = String(format: "目标太小了，画面会非常糊。这段长度建议至少 %.0f MB。", minMB.rounded(.up))
+            videoKbps = minVideoKbps
+        }
+        let settings = CompressSettings(shortSide: side, fps: fps,
+                                        bitrateMbps: (videoKbps / 10).rounded() / 100,
+                                        hevc: true, audioKbps: speechAudioKbps, monoAudio: true,
+                                        keyframeSeconds: 10)
+        return (settings, warning)
     }
 }
 
@@ -175,7 +295,7 @@ enum Exporter {
         var compression: [String: Any] = [
             AVVideoAverageBitRateKey: Int(s.bitrateMbps * 1_000_000),
             AVVideoExpectedSourceFrameRateKey: fps,
-            AVVideoMaxKeyFrameIntervalKey: fps * 2,
+            AVVideoMaxKeyFrameIntervalKey: fps * max(1, s.keyframeSeconds),
         ]
         if !s.hevc { compression[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel }
 
@@ -206,11 +326,12 @@ enum Exporter {
                 sourceChannels = Int(asbd.mChannelsPerFrame)
                 sourceRate = asbd.mSampleRate
             }
-            let channels = sourceChannels == 1 ? 1 : 2
+            let channels = (sourceChannels == 1 || s.monoAudio) ? 1 : 2
             let sampleRate = (sourceRate == 48000 || sourceRate == 44100) ? sourceRate : 44100
             var layout = AudioChannelLayout()
             layout.mChannelLayoutTag = channels == 1 ? kAudioChannelLayoutTag_Mono : kAudioChannelLayoutTag_Stereo
             let layoutData = Data(bytes: &layout, count: MemoryLayout<AudioChannelLayout>.size)
+            let audioBitrate = s.audioKbps > 0 ? s.audioKbps * 1000 : (channels == 1 ? 96_000 : 128_000)
 
             let out = AVAssetReaderAudioMixOutput(audioTracks: audioTracks, audioSettings: [
                 AVFormatIDKey: kAudioFormatLinearPCM,
@@ -228,7 +349,7 @@ enum Exporter {
                 AVSampleRateKey: sampleRate,
                 AVNumberOfChannelsKey: channels,
                 AVChannelLayoutKey: layoutData,
-                AVEncoderBitRateKey: channels == 1 ? 96_000 : 128_000,
+                AVEncoderBitRateKey: audioBitrate,
             ])
             input.expectsMediaDataInRealTime = false
             if reader.canAdd(out) && writer.canAdd(input) {
