@@ -26,7 +26,7 @@
 
 ## 安卓版（APK）
 `android/` 文件夹里是功能一样的安卓版（Android 10 以上）。推送后 GitHub Actions 的 **Build APK** 会自动编译，
-在 Artifacts 下载 `VideoTool-apk`，解压得到 `VideoTool.apk` 直接安装（每次签名一样，可以覆盖更新）。
+在 Artifacts 下载 `VideoTool-apk`，解压得到 `VideoTool.apk` 直接安装。没有设置签名 Secrets 时用临时签名，更新前要先卸载旧版（打开「处理完自动存到相册 / 音乐」后，导出的文件卸载后也还在）。
 安卓版切到别的 App 或锁屏也会继续处理，通知栏显示进度。MP3 / OGG 编码和 iPhone 版共用 `Codecs/`、`Vendor/` 的源码。
 
 ## 编译 IPA（不需要 Mac）

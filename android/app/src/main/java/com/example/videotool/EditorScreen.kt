@@ -302,6 +302,7 @@ fun EditorScreen(model: EditorModel, dim: Boolean, onDimChange: (Boolean) -> Uni
                     }
                 }
                 DimToggle(dim, onDimChange)
+                AutoSaveToggle()
             }
         }
 
@@ -309,6 +310,7 @@ fun EditorScreen(model: EditorModel, dim: Boolean, onDimChange: (Boolean) -> Uni
             is JobStatus.Done -> FormSection(header = "完成", footer = "文件也在右上角「已导出」里。") {
                 Text("✓ ${status.file.name}", color = Green)
                 Caption(Storage.sizeText(status.file))
+                status.note?.let { Caption(it) }
                 FileActions(status.file) { resultMessage = it }
                 resultMessage?.let { Caption(it) }
             }

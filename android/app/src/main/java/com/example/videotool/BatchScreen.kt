@@ -123,6 +123,7 @@ fun BatchScreen(dim: Boolean, onDimChange: (Boolean) -> Unit, requestNotificatio
                 ) { Text("▶ 开始批量处理（$waiting 个）") }
             }
             DimToggle(dim, onDimChange)
+            AutoSaveToggle()
         }
 
         message?.let { FormSection { Text(it) } }
@@ -146,10 +147,13 @@ private fun BatchRow(item: Job) {
                 LinearProgressIndicator(progress = { s.progress.toFloat() }, modifier = Modifier.fillMaxWidth())
                 Caption("处理中 ${(s.progress * 100).toInt()}%")
             }
-            is JobStatus.Done -> Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("✓ 完成 · ${Storage.sizeText(s.file)}", color = Green, style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.weight(1f))
-                TextButton(onClick = { Storage.share(context, s.file) }) { Text("分享") }
+            is JobStatus.Done -> {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("✓ 完成 · ${Storage.sizeText(s.file)}", color = Green, style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f))
+                    TextButton(onClick = { Storage.share(context, s.file) }) { Text("分享") }
+                }
+                s.note?.let { Caption(it) }
             }
             is JobStatus.Failed -> Caption("失败：${s.message}", MaterialTheme.colorScheme.error)
         }

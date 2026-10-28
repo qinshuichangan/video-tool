@@ -32,7 +32,8 @@ enum class JobKind { SINGLE, BATCH }
 sealed class JobStatus {
     data object Waiting : JobStatus()
     data class Running(val progress: Double) : JobStatus()
-    data class Done(val file: File) : JobStatus()
+    /** note：自动另存的结果（例：「已存到相册（影片/剪辑转换）」） */
+    data class Done(val file: File, val note: String? = null) : JobStatus()
     data class Failed(val message: String) : JobStatus()
 }
 
@@ -160,7 +161,11 @@ object JobEngine {
                 val result = runCatching { process(next) }
                 when {
                     result.isSuccess -> {
-                        setStatus(next.id, JobStatus.Done(result.getOrThrow()))
+                        val file = result.getOrThrow()
+                        // 自动另存一份到公共的「影片 / 音乐」文件夹：卸载 App 后文件也还在
+                        val note = if (OutputChoice.autoSaveEnabled(app))
+                            withContext(Dispatchers.IO) { Storage.saveToGallery(app, file) } else null
+                        setStatus(next.id, JobStatus.Done(file, note))
                         if (next.kind == JobKind.BATCH) { Storage.deleteImport(next.input); batchDone++ }
                     }
                     result.exceptionOrNull() is CancellationException -> {

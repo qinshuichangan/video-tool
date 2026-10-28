@@ -181,6 +181,10 @@ data class OutputChoice(
             )
         }
 
+        fun autoSaveEnabled(context: Context) = prefs(context).getBoolean("autoSaveToGallery", true)
+        fun setAutoSaveEnabled(context: Context, value: Boolean) =
+            prefs(context).edit().putBoolean("autoSaveToGallery", value).apply()
+
         fun dimEnabled(context: Context) = prefs(context).getBoolean("dimWhileWorking", true)
         fun setDimEnabled(context: Context, value: Boolean) =
             prefs(context).edit().putBoolean("dimWhileWorking", value).apply()

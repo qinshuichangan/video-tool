@@ -109,6 +109,18 @@ fun DimToggle(dim: Boolean, onChange: (Boolean) -> Unit) {
         dim, onChange = onChange)
 }
 
+/** 「处理完自动存到相册 / 音乐」开关 */
+@Composable
+fun AutoSaveToggle() {
+    val context = LocalContext.current
+    var on by remember { mutableStateOf(OutputChoice.autoSaveEnabled(context)) }
+    SwitchRow("处理完自动存到相册 / 音乐",
+        "视频存到「影片/剪辑转换」，音频存到「音乐/剪辑转换」。卸载 App 后这些文件也还在。", on) {
+        on = it
+        OutputChoice.setAutoSaveEnabled(context, it)
+    }
+}
+
 /** 「输出」设置（单个和批量共用） */
 @Composable
 fun OutputSettingsSection(
