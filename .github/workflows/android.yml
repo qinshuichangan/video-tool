@@ -1,0 +1,54 @@
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'android/**'
+      - 'Codecs/**'
+      - 'Vendor/**'
+      - '.github/workflows/android.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+
+      # 固定签名（可选）：仓库 Settings → Secrets 里设置 ANDROID_KEYSTORE_BASE64 和 ANDROID_KEYSTORE_PASSWORD。
+      # 没设置的话用临时签名，每次更新要先卸载旧版。
+      - name: Prepare signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ] && [ -n "$KEYSTORE_PASSWORD" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            echo "VIDEOTOOL_KEYSTORE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+            echo "VIDEOTOOL_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "使用固定签名"
+          else
+            echo "没有设置签名 Secrets，使用临时签名"
+          fi
+
+      - name: Build APK
+        working-directory: android
+        run: gradle assembleRelease --no-daemon
+
+      - name: Rename
+        run: cp android/app/build/outputs/apk/release/app-release.apk VideoTool.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VideoTool-apk
+          path: VideoTool.apk

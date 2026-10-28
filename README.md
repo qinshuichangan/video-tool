@@ -24,6 +24,11 @@
 - 在「文件」App 里对视频/音频点「分享」→ 选「剪辑转换」也能直接打开
 - 结果可以分享、存到相册，也会出现在「文件」App →「我的 iPhone」→「剪辑转换」
 
+## 安卓版（APK）
+`android/` 文件夹里是功能一样的安卓版（Android 10 以上）。推送后 GitHub Actions 的 **Build APK** 会自动编译，
+在 Artifacts 下载 `VideoTool-apk`，解压得到 `VideoTool.apk` 直接安装（每次签名一样，可以覆盖更新）。
+安卓版切到别的 App 或锁屏也会继续处理，通知栏显示进度。MP3 / OGG 编码和 iPhone 版共用 `Codecs/`、`Vendor/` 的源码。
+
 ## 编译 IPA（不需要 Mac）
 1. 把这个仓库的全部内容（包括 `.github` 文件夹）放到 GitHub 上。
 2. 打开仓库的 **Actions** 页面，选 **Build IPA** → **Run workflow**（推送到 main 也会自动编译）。
