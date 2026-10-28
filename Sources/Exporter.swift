@@ -270,6 +270,9 @@ enum Exporter {
         let originalFPS = sourceFPS > 0 ? Int(sourceFPS.rounded()) : 30
         let fps = s.fps > 0 ? min(s.fps, originalFPS) : originalFPS
         composition.frameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))
+        // 系统默认「跟着原视频的帧时间走」，那样 frameDuration 会被忽略（1.31 之前输出还是 60 fps 的原因）
+        composition.sourceTrackIDForFrameTiming = kCMPersistentTrackID_Invalid
+        let minFrameGap = 1.0 / Double(fps) * 0.9
 
         // HDR（iPhone 默认拍的）统一转成普通 SDR，到哪里播放颜色都正常
         composition.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
@@ -384,6 +387,7 @@ enum Exporter {
                     group.enter()
                     var finished = false
                     var lastReported = -1.0
+                    var lastWritten = -Double.infinity
                     func finish() {
                         finished = true
                         input.markAsFinished()
@@ -401,6 +405,14 @@ enum Exporter {
                                         lastReported = fraction
                                         progress(fraction)
                                     }
+                                }
+                            }
+                            // 双保险：万一系统还是给了更多帧，把超过目标帧率的帧丢掉
+                            if reportsProgress {
+                                let t = CMSampleBufferGetPresentationTimeStamp(buffer).seconds
+                                if t.isFinite {
+                                    if t - lastWritten < minFrameGap { continue }
+                                    lastWritten = t
                                 }
                             }
                             if !input.append(buffer) {
