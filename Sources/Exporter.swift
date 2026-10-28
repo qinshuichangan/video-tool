@@ -3,13 +3,14 @@ import AudioToolbox
 
 /// 输出格式
 enum OutputFormat: String, CaseIterable, Identifiable {
-    case video, m4a, aac, mp3, ogg
+    case video, compressed, m4a, aac, mp3, ogg
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
         case .video: return "视频（MP4）"
+        case .compressed: return "压缩视频（调码率/帧率/分辨率）"
         case .m4a: return "AAC 音频（.m4a）"
         case .aac: return "AAC 音频（.aac）"
         case .mp3: return "MP3 音频"
@@ -19,7 +20,7 @@ enum OutputFormat: String, CaseIterable, Identifiable {
 
     var fileExtension: String {
         switch self {
-        case .video: return "mp4"
+        case .video, .compressed: return "mp4"
         case .m4a: return "m4a"
         case .aac: return "aac"
         case .mp3: return "mp3"
@@ -27,7 +28,36 @@ enum OutputFormat: String, CaseIterable, Identifiable {
         }
     }
 
-    var isAudio: Bool { self != .video }
+    var isVideo: Bool { self == .video || self == .compressed }
+    var isAudio: Bool { !isVideo }
+}
+
+/// 压缩视频的设置
+struct CompressSettings: Sendable {
+    var shortSide: Int        // 分辨率（按短边算），0 = 原始
+    var fps: Int              // 帧率，0 = 原始
+    var bitrateMbps: Double   // 视频码率
+    var hevc: Bool            // true = HEVC（更小），false = H.264（兼容性好）
+
+    struct Option: Hashable, Sendable {
+        let value: Int
+        let label: String
+    }
+
+    static let resolutions: [Option] = [
+        .init(value: 0, label: "原始"), .init(value: 1080, label: "1080p"), .init(value: 720, label: "720p"),
+        .init(value: 540, label: "540p"), .init(value: 480, label: "480p"), .init(value: 360, label: "360p"),
+    ]
+    static let frameRates: [Option] = [
+        .init(value: 0, label: "原始"), .init(value: 60, label: "60 fps"), .init(value: 30, label: "30 fps"),
+        .init(value: 25, label: "25 fps"), .init(value: 24, label: "24 fps"), .init(value: 15, label: "15 fps"),
+    ]
+    static let bitrateRange: ClosedRange<Double> = 0.3...20
+
+    /// 预计文件大小（MB），声音按 128 kbps 算
+    static func estimatedMB(seconds: Double, bitrateMbps: Double) -> Double {
+        (bitrateMbps + 0.128) * seconds / 8
+    }
 }
 
 struct AppError: LocalizedError {
@@ -92,6 +122,205 @@ enum Exporter {
         }
     }
 
+    // MARK: - 压缩视频
+
+    /// 重新编码视频，可以调分辨率、帧率、码率。输出 MP4（HEVC 或 H.264 + AAC）。
+    /// 分辨率和帧率只会降低、不会提高。
+    static func compressVideo(source: URL, range: CMTimeRange, settings s: CompressSettings, output: URL,
+                              progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
+        let asset = AVURLAsset(url: source)
+        let videoTracks = try await asset.loadTracks(withMediaType: .video)
+        guard let firstVideo = videoTracks.first else { throw AppError("这个文件没有画面") }
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        let sourceFPS = try await firstVideo.load(.nominalFrameRate)
+
+        // 系统帮忙把方向处理好（竖拍的视频不会变成横的）
+        let composition = try await AVMutableVideoComposition.videoComposition(withPropertiesOf: asset)
+        let renderSize = composition.renderSize
+        guard renderSize.width > 0, renderSize.height > 0 else { throw AppError("读不出视频的尺寸") }
+
+        // 分辨率：按短边缩小，宽高取偶数
+        let shortSource = min(renderSize.width, renderSize.height)
+        let scale = s.shortSide > 0 ? min(1, CGFloat(s.shortSide) / shortSource) : 1
+        let width = max(2, Int((renderSize.width * scale / 2).rounded()) * 2)
+        let height = max(2, Int((renderSize.height * scale / 2).rounded()) * 2)
+
+        // 帧率：不超过原视频
+        let originalFPS = sourceFPS > 0 ? Int(sourceFPS.rounded()) : 30
+        let fps = s.fps > 0 ? min(s.fps, originalFPS) : originalFPS
+        composition.frameDuration = CMTime(value: 1, timescale: CMTimeScale(fps))
+
+        // HDR（iPhone 默认拍的）统一转成普通 SDR，到哪里播放颜色都正常
+        composition.colorPrimaries = AVVideoColorPrimaries_ITU_R_709_2
+        composition.colorTransferFunction = AVVideoTransferFunction_ITU_R_709_2
+        composition.colorYCbCrMatrix = AVVideoYCbCrMatrix_ITU_R_709_2
+
+        // ---- 读取 ----
+        let reader = try AVAssetReader(asset: asset)
+        reader.timeRange = range
+
+        let videoOut = AVAssetReaderVideoCompositionOutput(videoTracks: videoTracks, videoSettings: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,
+        ])
+        videoOut.videoComposition = composition
+        videoOut.alwaysCopiesSampleData = false
+        guard reader.canAdd(videoOut) else { throw AppError("无法读取这个视频的画面") }
+        reader.add(videoOut)
+
+        // ---- 写入 ----
+        try? FileManager.default.removeItem(at: output)
+        let writer = try AVAssetWriter(outputURL: output, fileType: .mp4)
+        writer.shouldOptimizeForNetworkUse = true
+
+        var compression: [String: Any] = [
+            AVVideoAverageBitRateKey: Int(s.bitrateMbps * 1_000_000),
+            AVVideoExpectedSourceFrameRateKey: fps,
+            AVVideoMaxKeyFrameIntervalKey: fps * 2,
+        ]
+        if !s.hevc { compression[AVVideoProfileLevelKey] = AVVideoProfileLevelH264HighAutoLevel }
+
+        let videoIn = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: s.hevc ? AVVideoCodecType.hevc : AVVideoCodecType.h264,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height,
+            AVVideoScalingModeKey: AVVideoScalingModeResizeAspect,
+            AVVideoColorPropertiesKey: [
+                AVVideoColorPrimariesKey: AVVideoColorPrimaries_ITU_R_709_2,
+                AVVideoTransferFunctionKey: AVVideoTransferFunction_ITU_R_709_2,
+                AVVideoYCbCrMatrixKey: AVVideoYCbCrMatrix_ITU_R_709_2,
+            ],
+            AVVideoCompressionPropertiesKey: compression,
+        ])
+        videoIn.expectsMediaDataInRealTime = false
+        guard writer.canAdd(videoIn) else { throw AppError("这个设置没法编码，换个分辨率或编码试试") }
+        writer.add(videoIn)
+
+        // 声音：重新编码成 AAC（单声道保持单声道，其它混成立体声）
+        var audioOut: AVAssetReaderAudioMixOutput?
+        var audioIn: AVAssetWriterInput?
+        if !audioTracks.isEmpty {
+            var sourceChannels = 2
+            var sourceRate = 44100.0
+            if let desc = try await audioTracks[0].load(.formatDescriptions).first,
+               let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee {
+                sourceChannels = Int(asbd.mChannelsPerFrame)
+                sourceRate = asbd.mSampleRate
+            }
+            let channels = sourceChannels == 1 ? 1 : 2
+            let sampleRate = (sourceRate == 48000 || sourceRate == 44100) ? sourceRate : 44100
+            var layout = AudioChannelLayout()
+            layout.mChannelLayoutTag = channels == 1 ? kAudioChannelLayoutTag_Mono : kAudioChannelLayoutTag_Stereo
+            let layoutData = Data(bytes: &layout, count: MemoryLayout<AudioChannelLayout>.size)
+
+            let out = AVAssetReaderAudioMixOutput(audioTracks: audioTracks, audioSettings: [
+                AVFormatIDKey: kAudioFormatLinearPCM,
+                AVLinearPCMBitDepthKey: 16,
+                AVLinearPCMIsFloatKey: false,
+                AVLinearPCMIsBigEndianKey: false,
+                AVLinearPCMIsNonInterleaved: false,
+                AVSampleRateKey: sampleRate,
+                AVNumberOfChannelsKey: channels,
+                AVChannelLayoutKey: layoutData,
+            ])
+            out.alwaysCopiesSampleData = false
+            let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: sampleRate,
+                AVNumberOfChannelsKey: channels,
+                AVChannelLayoutKey: layoutData,
+                AVEncoderBitRateKey: channels == 1 ? 96_000 : 128_000,
+            ])
+            input.expectsMediaDataInRealTime = false
+            if reader.canAdd(out) && writer.canAdd(input) {
+                reader.add(out)
+                writer.add(input)
+                audioOut = out
+                audioIn = input
+            }
+        }
+
+        guard reader.startReading() else {
+            throw AppError("读取失败：\(reader.error?.localizedDescription ?? "未知错误")")
+        }
+        guard writer.startWriting() else {
+            reader.cancelReading()
+            throw AppError("无法写入：\(writer.error?.localizedDescription ?? "未知错误")")
+        }
+        writer.startSession(atSourceTime: range.start)
+
+        // ---- 把画面和声音一边读一边写 ----
+        let startSeconds = range.start.seconds
+        let totalSeconds = max(range.duration.seconds, 0.001)
+
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+                let group = DispatchGroup()
+
+                func pump(_ out: AVAssetReaderOutput, into input: AVAssetWriterInput,
+                          label: String, reportsProgress: Bool) {
+                    group.enter()
+                    var finished = false
+                    var lastReported = -1.0
+                    func finish() {
+                        finished = true
+                        input.markAsFinished()
+                        group.leave()
+                    }
+                    input.requestMediaDataWhenReady(on: DispatchQueue(label: label)) {
+                        guard !finished else { return }
+                        while input.isReadyForMoreMediaData {
+                            guard let buffer = out.copyNextSampleBuffer() else { finish(); return }
+                            if reportsProgress {
+                                let pts = CMSampleBufferGetPresentationTimeStamp(buffer)
+                                if pts.isNumeric {
+                                    let fraction = min(max((pts.seconds - startSeconds) / totalSeconds, 0), 0.99)
+                                    if fraction - lastReported >= 0.01 {
+                                        lastReported = fraction
+                                        progress(fraction)
+                                    }
+                                }
+                            }
+                            if !input.append(buffer) {
+                                reader.cancelReading()
+                                finish()
+                                return
+                            }
+                        }
+                    }
+                }
+
+                pump(videoOut, into: videoIn, label: "compress.video", reportsProgress: true)
+                if let audioOut, let audioIn {
+                    pump(audioOut, into: audioIn, label: "compress.audio", reportsProgress: false)
+                }
+                group.notify(queue: .global()) { done.resume() }
+            }
+        } onCancel: {
+            reader.cancelReading()
+        }
+
+        if Task.isCancelled {
+            writer.cancelWriting()
+            try? FileManager.default.removeItem(at: output)
+            throw CancellationError()
+        }
+        if reader.status == .failed || writer.status == .failed {
+            let reason = writer.error?.localizedDescription ?? reader.error?.localizedDescription ?? "未知错误"
+            writer.cancelWriting()
+            try? FileManager.default.removeItem(at: output)
+            throw AppError("压缩失败：\(reason)")
+        }
+
+        await writer.finishWriting()
+        guard writer.status == .completed else {
+            let reason = writer.error?.localizedDescription ?? "未知错误"
+            try? FileManager.default.removeItem(at: output)
+            throw AppError("压缩失败：\(reason)")
+        }
+        progress(1)
+        return output
+    }
+
     // MARK: - 转成音频
 
     static func convertAudio(source: URL, range: CMTimeRange, format: OutputFormat, bitrate: Int,
@@ -147,7 +376,7 @@ enum Exporter {
         case .aac:
             sink = try AACSink(url: output, fileType: kAudioFileAAC_ADTSType,
                                sampleRate: sampleRate, channels: channels, bitrate: bitrate)
-        case .video:
+        case .video, .compressed:
             throw AppError("内部错误：格式不对")
         }
 

@@ -8,6 +8,10 @@ struct ContentView: View {
     @AppStorage(EditorModel.formatKey) private var format: OutputFormat = .video
     @AppStorage(EditorModel.bitrateKey) private var bitrate = 192
     @AppStorage(EditorModel.preciseKey) private var precise = false
+    @AppStorage(EditorModel.compressSideKey) private var compressSide = 720
+    @AppStorage(EditorModel.compressFPSKey) private var compressFPS = 30
+    @AppStorage(EditorModel.compressBitrateKey) private var compressBitrate = 3.0
+    @AppStorage(EditorModel.compressHEVCKey) private var compressHEVC = true
 
     @State private var photoItem: PhotosPickerItem?
     @State private var showFileImporter = false
@@ -105,7 +109,7 @@ struct ContentView: View {
         }
         .onChange(of: model.sourceURL) { _ in
             // 只有声音的文件不能输出视频
-            if !model.hasVideo && format == .video { format = .mp3 }
+            if !model.hasVideo && format.isVideo { format = .mp3 }
         }
     }
 
@@ -138,6 +142,11 @@ struct ContentView: View {
                          + (model.hasVideo ? "" : "（只有声音）"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if !model.videoInfo.isEmpty {
+                        Text(model.videoInfo)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         } header: {
@@ -238,7 +247,7 @@ struct ContentView: View {
     // MARK: - 输出格式
 
     private var availableFormats: [OutputFormat] {
-        OutputFormat.allCases.filter { $0 != .video || model.hasVideo }
+        OutputFormat.allCases.filter { !$0.isVideo || model.hasVideo }
     }
 
     private var outputSection: some View {
@@ -250,6 +259,8 @@ struct ContentView: View {
             }
             if format == .video {
                 Toggle("精确剪切（重新编码）", isOn: $precise)
+            } else if format == .compressed {
+                compressControls
             } else {
                 Picker("音质（码率）", selection: $bitrate) {
                     ForEach(Exporter.bitrates, id: \.self) { b in
@@ -264,6 +275,8 @@ struct ContentView: View {
                 Text(precise
                      ? "重新编码：切点精确到帧，但比较慢，画质会有一点点损失。"
                      : "不重新编码：很快、画质无损。开头可能会从最近的关键帧开始，有零点几秒的误差，介意的话打开「精确剪切」。")
+            } else if format == .compressed {
+                Text("分辨率和帧率只会降低、不会比原视频高。码率参考：1080p 约 4–8 Mbps，720p 约 2–4 Mbps，480p 约 1–2 Mbps，太低会有马赛克。HEVC 体积更小；要发给旧手机或 Windows 电脑就关掉，用 H.264。HDR 视频会转成普通画面。")
             } else if format == .ogg {
                 Text("OGG 用的是可变码率，选的数值是大概的平均码率。iPhone 自带的播放器不能播 OGG。")
             } else if format == .aac {
@@ -273,6 +286,43 @@ struct ContentView: View {
             }
         }
         .disabled(model.isExporting)
+    }
+
+    private var compressControls: some View {
+        Group {
+            Picker("分辨率", selection: $compressSide) {
+                ForEach(CompressSettings.resolutions, id: \.value) { item in
+                    Text(item.label).tag(item.value)
+                }
+            }
+            Picker("帧率", selection: $compressFPS) {
+                ForEach(CompressSettings.frameRates, id: \.value) { item in
+                    Text(item.label).tag(item.value)
+                }
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("码率")
+                    Spacer()
+                    Text(String(format: "%.1f Mbps", compressBitrate))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                }
+                Slider(value: $compressBitrate, in: CompressSettings.bitrateRange, step: 0.1)
+                if let length = model.selectedLength {
+                    Text(String(format: "预计大小约 %.1f MB",
+                                CompressSettings.estimatedMB(seconds: length, bitrateMbps: compressBitrate)))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Toggle("HEVC 编码（体积更小）", isOn: $compressHEVC)
+        }
+    }
+
+    private var compressSettings: CompressSettings {
+        CompressSettings(shortSide: compressSide, fps: compressFPS,
+                         bitrateMbps: compressBitrate, hevc: compressHEVC)
     }
 
     // MARK: - 导出
@@ -294,10 +344,9 @@ struct ContentView: View {
                     focusedField = nil
                     photoMessage = nil
                     let f = availableFormats.contains(format) ? format : .mp3
-                    model.export(format: f, bitrate: bitrate, precise: precise)
+                    model.export(format: f, bitrate: bitrate, precise: precise, compress: compressSettings)
                 } label: {
-                    Label(format == .video ? "开始截取" : "开始转换",
-                          systemImage: format == .video ? "scissors" : "waveform")
+                    Label(exportTitle, systemImage: exportIcon)
                         .frame(maxWidth: .infinity)
                 }
                 .disabled(model.rangeProblem != nil)
@@ -306,6 +355,22 @@ struct ContentView: View {
             if model.isExporting {
                 Text("处理中请留在这个 App 里。")
             }
+        }
+    }
+
+    private var exportTitle: String {
+        switch format {
+        case .video: return "开始截取"
+        case .compressed: return "开始压缩"
+        default: return "开始转换"
+        }
+    }
+
+    private var exportIcon: String {
+        switch format {
+        case .video: return "scissors"
+        case .compressed: return "arrow.down.right.and.arrow.up.left"
+        default: return "waveform"
         }
     }
 

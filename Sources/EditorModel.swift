@@ -23,6 +23,10 @@ final class EditorModel: ObservableObject {
     static let formatKey = "outputFormat"
     static let bitrateKey = "audioBitrate"
     static let preciseKey = "preciseTrim"
+    static let compressSideKey = "compressShortSide"
+    static let compressFPSKey = "compressFPS"
+    static let compressBitrateKey = "compressBitrate"
+    static let compressHEVCKey = "compressHEVC"
 
     // 已载入的文件
     @Published private(set) var sourceURL: URL?
@@ -30,6 +34,8 @@ final class EditorModel: ObservableObject {
     @Published private(set) var duration: Double = 0
     @Published private(set) var hasVideo = false
     @Published private(set) var hasAudio = false
+    /// 原视频信息，例：「1920×1080 · 30 fps · 码率 15.2 Mbps · 85.3 MB」
+    @Published private(set) var videoInfo = ""
     @Published private(set) var isLoading = false
 
     // 截取范围（文字输入）
@@ -222,6 +228,7 @@ final class EditorModel: ObservableObject {
                 duration = length
                 hasVideo = !videoTracks.isEmpty
                 hasAudio = !audioTracks.isEmpty
+                videoInfo = await Self.describeVideo(videoTracks.first, file: url)
                 currentTime = 0
                 resetRange()
                 player.replaceCurrentItem(with: AVPlayerItem(asset: asset))
@@ -229,6 +236,21 @@ final class EditorModel: ObservableObject {
                 errorMessage = "打开失败：\(error.localizedDescription)"
             }
         }
+    }
+
+    /// 原视频的分辨率、帧率、码率、文件大小
+    private static func describeVideo(_ track: AVAssetTrack?, file: URL) async -> String {
+        guard let track,
+              let info = try? await track.load(
+                .naturalSize, .preferredTransform, .nominalFrameRate, .estimatedDataRate)
+        else { return "" }
+        let (size, transform, fps, rate) = info
+        let rect = CGRect(origin: .zero, size: size).applying(transform)
+        var parts = ["\(Int(abs(rect.width).rounded()))×\(Int(abs(rect.height).rounded()))"]
+        if fps > 0 { parts.append("\(Int(fps.rounded())) fps") }
+        if rate > 0 { parts.append(String(format: "码率 %.1f Mbps", Double(rate) / 1_000_000)) }
+        parts.append(LibraryView.sizeText(file))
+        return parts.joined(separator: " · ")
     }
 
     /// 删掉以前导入的临时文件（正在用的那个除外）
@@ -244,14 +266,14 @@ final class EditorModel: ObservableObject {
 
     // MARK: - 导出
 
-    func export(format: OutputFormat, bitrate: Int, precise: Bool) {
+    func export(format: OutputFormat, bitrate: Int, precise: Bool, compress: CompressSettings) {
         guard let source = sourceURL, !isExporting else { return }
         if let problem = rangeProblem {
             errorMessage = problem
             return
         }
         guard let start = startSeconds, let end = endSeconds else { return }
-        if format == .video && !hasVideo {
+        if format.isVideo && !hasVideo {
             errorMessage = "这个文件没有画面，只能转成音频"
             return
         }
@@ -264,7 +286,8 @@ final class EditorModel: ObservableObject {
         let range = CMTimeRange(
             start: CMTime(seconds: start, preferredTimescale: 600),
             end: CMTime(seconds: min(end, duration), preferredTimescale: 600))
-        let output = Self.outputURL(name: sourceName, start: start, end: end,
+        let name = format == .compressed ? sourceName + "_压缩" : sourceName
+        let output = Self.outputURL(name: name, start: start, end: end,
                                     full: isFullRange, ext: format.fileExtension)
 
         isExporting = true
@@ -277,10 +300,14 @@ final class EditorModel: ObservableObject {
             Task { @MainActor in self.progress = value }
         }
         let task = Task.detached(priority: .userInitiated) { () async throws -> URL in
-            if format == .video {
+            switch format {
+            case .video:
                 return try await Exporter.trimVideo(source: source, range: range, precise: precise,
                                                     output: output, progress: report)
-            } else {
+            case .compressed:
+                return try await Exporter.compressVideo(source: source, range: range, settings: compress,
+                                                        output: output, progress: report)
+            default:
                 return try await Exporter.convertAudio(source: source, range: range, format: format,
                                                        bitrate: bitrate, output: output, progress: report)
             }
