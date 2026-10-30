@@ -50,13 +50,14 @@ final class EditorModel: ObservableObject {
     // 导出
     @Published private(set) var isExporting = false
     @Published private(set) var progress: Double = 0
-    @Published private(set) var resultURL: URL?
+    /// 导出的结果（分割时有好几个）
+    @Published private(set) var results: [URL] = []
     @Published var errorMessage: String?
 
     let player = AVPlayer()
     private var timeObserver: Any?
     private var boundaryObserver: Any?
-    private var exportTask: Task<URL, Error>?
+    private var exportTask: Task<[URL], Error>?
 
     init() {
         timeObserver = player.addPeriodicTimeObserver(
@@ -211,7 +212,7 @@ final class EditorModel: ObservableObject {
 
         isLoading = true
         errorMessage = nil
-        resultURL = nil
+        results = []
         Task {
             defer { isLoading = false }
             let asset = AVURLAsset(url: url)
@@ -279,7 +280,8 @@ final class EditorModel: ObservableObject {
 
     // MARK: - 导出
 
-    func export(format: OutputFormat, bitrate: Int, precise: Bool, compress: CompressSettings) {
+    func export(format: OutputFormat, bitrate: Int, precise: Bool, compress: CompressSettings,
+                split: SplitSettings) {
         guard let source = sourceURL, !isExporting else { return }
         if let problem = rangeProblem {
             errorMessage = problem
@@ -296,17 +298,15 @@ final class EditorModel: ObservableObject {
         }
 
         player.pause()
-        let range = CMTimeRange(
-            start: CMTime(seconds: start, preferredTimescale: 600),
-            end: CMTime(seconds: min(end, duration), preferredTimescale: 600))
         let name = format == .compressed ? sourceName + "_压缩" : sourceName
-        let output = Self.outputURL(name: name, start: start, end: end,
-                                    full: isFullRange, ext: format.fileExtension)
+        let segments = Exporter.segments(base: name, start: start, end: min(end, duration),
+                                         fullFile: isFullRange, split: split, ext: format.fileExtension)
+        let job = Exporter.Job(format: format, precise: precise, audioBitrate: bitrate, compress: compress)
 
         isExporting = true
         progress = 0
         errorMessage = nil
-        resultURL = nil
+        results = []
 
         let report: @Sendable (Double) -> Void = { [weak self] value in
             guard let self else { return }
@@ -315,18 +315,8 @@ final class EditorModel: ObservableObject {
                 WorkSession.shared.update(progress: value)
             }
         }
-        let task = Task.detached(priority: .userInitiated) { () async throws -> URL in
-            switch format {
-            case .video:
-                return try await Exporter.trimVideo(source: source, range: range, precise: precise,
-                                                    output: output, progress: report)
-            case .compressed:
-                return try await Exporter.compressVideo(source: source, range: range, settings: compress,
-                                                        output: output, progress: report)
-            default:
-                return try await Exporter.convertAudio(source: source, range: range, format: format,
-                                                       bitrate: bitrate, output: output, progress: report)
-            }
+        let task = Task.detached(priority: .userInitiated) { () async throws -> [URL] in
+            try await Exporter.run(job, source: source, segments: segments, progress: report)
         }
         exportTask = task
 
@@ -338,8 +328,7 @@ final class EditorModel: ObservableObject {
         Task {
             var success = false
             do {
-                let url = try await task.value
-                resultURL = url
+                results = try await task.value
                 success = true
             } catch is CancellationError {
                 errorMessage = WorkSession.shared.backgroundCount != backgroundMark

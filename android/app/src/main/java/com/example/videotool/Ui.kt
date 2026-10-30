@@ -33,6 +33,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 val Orange = Color(0xFFE08A00)
@@ -125,6 +127,7 @@ fun AutoSaveToggle() {
 @Composable
 fun OutputSettingsSection(
     header: String,
+    splitHeader: String,
     choice: OutputChoice,
     allowVideo: Boolean,
     source: SourceVideo?,
@@ -146,6 +149,88 @@ fun OutputSettingsSection(
             OutputFormat.COMPRESSED -> CompressControls(choice, source, seconds, isBatch, enabled, ::update)
             else -> ChoiceRow("音质（码率）", OutputChoice.audioBitrates.map { it to "$it kbps" }, choice.audioBitrate, enabled) {
                 update(choice.copy(audioBitrate = it))
+            }
+        }
+    }
+
+    SplitSection(splitHeader, choice, format, source, seconds, isBatch, enabled, ::update)
+}
+
+/** 「分割」设置：处理完自动切成几段 */
+@Composable
+private fun SplitSection(
+    header: String, choice: OutputChoice, format: OutputFormat, source: SourceVideo?, seconds: Double?,
+    isBatch: Boolean, enabled: Boolean, update: (OutputChoice) -> Unit,
+) {
+    val split = choice.split
+    fun set(s: SplitSettings) = update(choice.copy(split = s))
+    val title = when (format) {
+        OutputFormat.VIDEO -> "分割成几段"
+        OutputFormat.COMPRESSED -> "压缩后自动分割"
+        else -> "转换后自动分割"
+    }
+    val footer = when {
+        !split.enabled -> "打开后，处理完会按设置切成几个文件，文件名后面加「_第1段」「_第2段」…，按名字排序就是顺序。"
+        format == OutputFormat.VIDEO -> if (choice.precise) "每段都重新编码，切点精确到帧，比较慢。"
+        else "不重新编码，很快、画质无损。每段开头从最近的关键帧开始，相邻两段可能会有一两秒重叠，不会漏掉内容；介意的话在上面打开「精确剪切」。"
+        format == OutputFormat.COMPRESSED -> "按上面的压缩设置处理，再切成几段，每段都能单独播放。压缩设置按整段的长度来算，所以「目标大小」是所有段加起来的大小。"
+        else -> "每段分别转成音频，可以一段一段发给 Claude 转写。"
+    }
+
+    FormSection(header = header, footer = footer) {
+        SwitchRow(title, "切成几个小文件，方便一段一段上传或发送", split.enabled, enabled) { set(split.copy(enabled = it)) }
+        if (split.enabled) {
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                SplitMode.entries.forEachIndexed { i, mode ->
+                    SegmentedButton(
+                        selected = split.mode == mode,
+                        onClick = { set(split.copy(mode = mode)) },
+                        shape = SegmentedButtonDefaults.itemShape(i, SplitMode.entries.size),
+                        enabled = enabled,
+                    ) { Text(mode.label, maxLines = 1) }
+                }
+            }
+            when (split.mode) {
+                SplitMode.MINUTES -> {
+                    var text by remember(split.minutes) { mutableStateOf(trimNumber(split.minutes)) }
+                    OutlinedTextField(
+                        value = text,
+                        onValueChange = { v ->
+                            text = v
+                            v.toDoubleOrNull()?.takeIf { it > 0 }?.let { set(split.copy(minutes = it)) }
+                        },
+                        label = { Text("每段长度（分钟）") },
+                        singleLine = true,
+                        enabled = enabled,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                SplitMode.COUNT -> Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("分成", Modifier.weight(1f))
+                    TextButton(onClick = { set(split.copy(count = max(2, split.count - 1))) },
+                        enabled = enabled && split.count > 2) { Text("－", style = MaterialTheme.typography.titleLarge) }
+                    Text("${split.count} 段")
+                    TextButton(onClick = { set(split.copy(count = min(SplitSettings.MAX_PARTS, split.count + 1))) },
+                        enabled = enabled && split.count < SplitSettings.MAX_PARTS) { Text("＋", style = MaterialTheme.typography.titleLarge) }
+                }
+            }
+            if (isBatch) {
+                Caption(if (split.mode == SplitMode.MINUTES)
+                    "每个文件分别按自己的长度来分，不够 ${TimeText.short(max(split.minutes, 0.1) * 60)} 的文件不分。"
+                else "每个文件都平均分成 ${split.count} 段。")
+            } else if (seconds != null && seconds > 0) {
+                Caption(split.summary(seconds), MaterialTheme.colorScheme.onSurface)
+                val parts = split.parts(0.0, seconds)
+                val longest = parts.maxOf { it.length }
+                if (parts.size > 1) {
+                    val mb = when (format) {
+                        OutputFormat.VIDEO -> null
+                        OutputFormat.COMPRESSED -> choice.compressSettings(source, seconds).estimatedMB(longest)
+                        else -> choice.audioBitrate * longest / 8 / 1000
+                    }
+                    mb?.let { Caption(String.format("每段预计最大约 %.1f MB", it)) }
+                }
             }
         }
     }

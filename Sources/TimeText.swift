@@ -51,6 +51,14 @@ enum TimeText {
         return String(format: "%d:%02d.%02d", m, s, f)
     }
 
+    /// 秒数 → 「15:00」或「1:02:03」（四舍五入到秒，用在说明文字里）
+    static func short(_ seconds: Double) -> String {
+        let total = Int(max(0, seconds).rounded())
+        let h = total / 3600, m = (total / 60) % 60, s = total % 60
+        if h > 0 { return String(format: "%d:%02d:%02d", h, m, s) }
+        return String(format: "%d:%02d", m, s)
+    }
+
     /// 用在文件名里的写法：「1m23s」「1h02m03s」（不足 1 秒的部分省略）
     static func fileStamp(_ seconds: Double) -> String {
         let total = Int(max(0, seconds).rounded(.down))

@@ -190,6 +190,81 @@ struct AppError: LocalizedError {
 enum Exporter {
     static let bitrates = [96, 128, 160, 192, 256, 320]
 
+    // MARK: - 一次处理（可能分成好几段）
+
+    /// 这次要怎么处理（所有段都一样）
+    struct Job: Sendable {
+        let format: OutputFormat
+        let precise: Bool
+        let audioBitrate: Int
+        let compress: CompressSettings
+    }
+
+    /// 一段：原文件里的哪一部分 → 写到哪个文件
+    struct Segment: Sendable {
+        let range: CMTimeRange
+        let output: URL
+    }
+
+    /// 按顺序一段一段处理，进度按长度算总的。中途失败或取消时，已经做好的几段也删掉（重新开始不会重复）。
+    static func run(_ job: Job, source: URL, segments: [Segment],
+                    progress: @escaping @Sendable (Double) -> Void) async throws -> [URL] {
+        let total = segments.reduce(0.0) { $0 + max($1.range.duration.seconds, 0.001) }
+        var finished = 0.0
+        var outputs: [URL] = []
+        do {
+            for segment in segments {
+                try Task.checkCancellation()
+                let length = max(segment.range.duration.seconds, 0.001)
+                let base = finished
+                let report: @Sendable (Double) -> Void = { p in
+                    progress(min((base + p * length) / total, 1))
+                }
+                let url = try await runOne(job, source: source, range: segment.range,
+                                           output: segment.output, progress: report)
+                outputs.append(url)
+                finished += length
+            }
+        } catch {
+            for url in outputs { try? FileManager.default.removeItem(at: url) }
+            throw error
+        }
+        progress(1)
+        return outputs
+    }
+
+    private static func runOne(_ job: Job, source: URL, range: CMTimeRange, output: URL,
+                               progress: @escaping @Sendable (Double) -> Void) async throws -> URL {
+        switch job.format {
+        case .video:
+            return try await trimVideo(source: source, range: range, precise: job.precise,
+                                       output: output, progress: progress)
+        case .compressed:
+            return try await compressVideo(source: source, range: range, settings: job.compress,
+                                           output: output, progress: progress)
+        default:
+            return try await convertAudio(source: source, range: range, format: job.format,
+                                          bitrate: job.audioBitrate, output: output, progress: progress)
+        }
+    }
+
+    /// 算出每段的范围和输出文件名。base：不带时间的名字（例：「我的视频_压缩」）
+    @MainActor
+    static func segments(base: String, start: Double, end: Double, fullFile: Bool,
+                         split: SplitSettings, ext: String) -> [Segment] {
+        let parts = split.parts(start: start, end: end)
+        return parts.enumerated().map { index, part in
+            let name = parts.count > 1
+                ? SplitSettings.partName(base, index: index, count: parts.count)
+                : base
+            let output = EditorModel.outputURL(name: name, start: part.start, end: part.end,
+                                               full: parts.count == 1 && fullFile, ext: ext)
+            let range = CMTimeRange(start: CMTime(seconds: part.start, preferredTimescale: 600),
+                                    end: CMTime(seconds: part.end, preferredTimescale: 600))
+            return Segment(range: range, output: output)
+        }
+    }
+
     // MARK: - 视频截取
 
     /// 截取视频。precise = false 时不重新编码（快、无损）；true 时重新编码（慢，但切点精确）。

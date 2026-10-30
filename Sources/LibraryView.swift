@@ -82,7 +82,14 @@ struct LibraryView: View {
     }
 
     static func sizeText(_ url: URL) -> String {
-        let bytes = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        totalSizeText([url])
+    }
+
+    /// 几个文件加起来的大小
+    static func totalSizeText(_ urls: [URL]) -> String {
+        let bytes = urls.reduce(0) { sum, url in
+            sum + ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+        }
         return ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
 }

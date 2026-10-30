@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     @StateObject private var model = EditorModel()
     @AppStorage(EditorModel.formatKey) private var format: OutputFormat = .video
+    @AppStorage(SplitSettings.enabledKey) private var splitEnabled = false
     @StateObject private var batch = BatchModel()
 
     @State private var photoItem: PhotosPickerItem?
@@ -35,15 +36,18 @@ struct ContentView: View {
                 if model.sourceURL != nil {
                     playerSection
                     rangeSection
-                    OutputSettingsSection(header: "3. 输出", allowVideo: model.hasVideo,
+                    OutputSettingsSection(header: "3. 输出", splitHeader: "4. 分割",
+                                          allowVideo: model.hasVideo,
                                           source: model.sourceVideo, seconds: model.selectedLength,
                                           targetFocus: $targetFocused)
                         .disabled(model.isExporting)
                     exportSection
                 }
 
-                if let url = model.resultURL {
+                if model.results.count == 1, let url = model.results.first {
                     resultSection(url)
+                } else if model.results.count > 1 {
+                    multiResultSection(model.results)
                 }
 
                 if let message = model.errorMessage {
@@ -281,7 +285,8 @@ struct ContentView: View {
                     model.export(format: choice.format(hasVideo: model.hasVideo),
                                  bitrate: choice.audioBitrate, precise: choice.precise,
                                  compress: choice.compressSettings(source: model.sourceVideo,
-                                                                   seconds: model.selectedLength))
+                                                                   seconds: model.selectedLength),
+                                 split: choice.split)
                 } label: {
                     Label(exportTitle, systemImage: exportIcon)
                         .frame(maxWidth: .infinity)
@@ -299,10 +304,11 @@ struct ContentView: View {
     }
 
     private var exportTitle: String {
+        let split = splitEnabled ? "并分割" : ""
         switch format {
-        case .video: return "开始截取"
-        case .compressed: return "开始压缩"
-        default: return "开始转换"
+        case .video: return splitEnabled ? "开始分割" : "开始截取"
+        case .compressed: return "开始压缩" + split
+        default: return "开始转换" + split
         }
     }
 
@@ -341,6 +347,53 @@ struct ContentView: View {
             Text("完成")
         } footer: {
             Text("文件也在「文件」App →「我的 iPhone」→「剪辑转换」里。")
+        }
+    }
+
+    /// 分割成好几段时的结果
+    private func multiResultSection(_ urls: [URL]) -> some View {
+        Section {
+            Label("分成了 \(urls.count) 段 · 一共 \(LibraryView.totalSizeText(urls))",
+                  systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+            ForEach(urls, id: \.self) { url in
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(url.lastPathComponent).font(.callout).lineLimit(2)
+                        Text(LibraryView.sizeText(url)).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button {
+                        photoMessage = Clipboard.copyFile(url)
+                            ? "已复制「\(url.lastPathComponent)」，可以去别的 App 粘贴"
+                            : "复制失败"
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                    }
+                    .accessibilityLabel("复制到剪贴板")
+                    ShareLink(item: url) {
+                        Image(systemName: "square.and.arrow.up")
+                    }
+                }
+                .buttonStyle(.borderless)
+            }
+            ShareLink(items: urls) {
+                Label("全部分享 / 存到其他 App", systemImage: "square.and.arrow.up.on.square")
+            }
+            if !urls.contains(where: LibraryView.isAudio) {
+                Button {
+                    Task { photoMessage = await PhotoSaver.saveAll(urls) }
+                } label: {
+                    Label("全部存到相册", systemImage: "photo.badge.plus")
+                }
+            }
+            if let photoMessage {
+                Text(photoMessage).font(.caption)
+            }
+        } header: {
+            Text("完成")
+        } footer: {
+            Text("每一行右边可以单独复制、分享。文件也在「文件」App →「我的 iPhone」→「剪辑转换」里。")
         }
     }
 }

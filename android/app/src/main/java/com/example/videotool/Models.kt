@@ -117,6 +117,76 @@ data class CompressSettings(
     }
 }
 
+enum class SplitMode(val label: String) {
+    MINUTES("每 X 分钟一段"),
+    COUNT("平均分成 X 段"),
+}
+
+/** 处理完自动分割成几段（和 iPhone 版一样） */
+data class SplitSettings(
+    val enabled: Boolean = false,
+    val mode: SplitMode = SplitMode.MINUTES,
+    val minutes: Double = 15.0,
+    val count: Int = 3,
+) {
+    data class Part(val start: Double, val end: Double) {
+        val length get() = end - start
+    }
+
+    /** 按时长分时，不限段数的话会分成几段 */
+    private fun rawMinuteCount(total: Double): Int {
+        val step = max(minutes, 0.1) * 60
+        var n = kotlin.math.ceil(total / step).toInt()
+        if (n > 1 && total - (n - 1) * step < MIN_TAIL) n--
+        return max(n, 1)
+    }
+
+    /** 把 start…end 分成几段（没打开分割、或者不够分时只有一段） */
+    fun parts(start: Double, end: Double): List<Part> {
+        val total = end - start
+        if (!enabled || total <= 1) return listOf(Part(start, end))
+        var n: Int
+        when (mode) {
+            SplitMode.MINUTES -> {
+                n = rawMinuteCount(total)
+                if (n <= MAX_PARTS) {
+                    val step = max(minutes, 0.1) * 60
+                    return (0 until n).map { i ->
+                        Part(start + i * step, if (i == n - 1) end else start + (i + 1) * step)
+                    }
+                }
+                n = MAX_PARTS  // 太多了：改成平均分 99 段
+            }
+            SplitMode.COUNT -> n = count
+        }
+        n = minOf(max(n, 1), MAX_PARTS, max(total.toInt(), 1))  // 每段至少 1 秒
+        val step = total / n
+        return (0 until n).map { i -> Part(start + step * i, if (i == n - 1) end else start + step * (i + 1)) }
+    }
+
+    /** 例：「会分成 3 段：每段 15:00，最后一段 12:31」 */
+    fun summary(total: Double): String {
+        val list = parts(0.0, total)
+        if (list.size <= 1) return "这段不够分，会照常输出一个文件。"
+        val first = list.first().length
+        val last = list.last().length
+        var text = if (kotlin.math.abs(first - last) < 1) "会分成 ${list.size} 段，每段约 ${TimeText.short(first)}"
+        else "会分成 ${list.size} 段：每段 ${TimeText.short(first)}，最后一段 ${TimeText.short(last)}"
+        if (mode == SplitMode.MINUTES && rawMinuteCount(total) > MAX_PARTS) text += "（最多 $MAX_PARTS 段，所以改成了平均分）"
+        return text
+    }
+
+    companion object {
+        const val MAX_PARTS = 99
+        /** 按时长分时，最后剩下不到这么多秒就并到前一段 */
+        const val MIN_TAIL = 10.0
+
+        /** 「我的视频_第1段」；10 段以上补 0（第01段），按名字排序就是顺序 */
+        fun partName(base: String, index: Int, count: Int): String =
+            base + "_第" + (index + 1).toString().padStart(count.toString().length, '0') + "段"
+    }
+}
+
 /** 输出设置（单个和批量共用，存在 SharedPreferences 里） */
 data class OutputChoice(
     val format: OutputFormat = OutputFormat.VIDEO,
@@ -128,6 +198,7 @@ data class OutputChoice(
     val manualBitrate: Double = 3.0,
     val manualHevc: Boolean = true,
     val targetMB: Double = 30.0,
+    val split: SplitSettings = SplitSettings(),
 ) {
     val manual get() = CompressSettings(manualSide, manualFps, manualBitrate, manualHevc)
 
@@ -156,6 +227,10 @@ data class OutputChoice(
             .putFloat("manualBitrate", manualBitrate.toFloat())
             .putBoolean("manualHevc", manualHevc)
             .putFloat("targetMB", targetMB.toFloat())
+            .putBoolean("splitEnabled", split.enabled)
+            .putString("splitMode", split.mode.name)
+            .putFloat("splitMinutes", split.minutes.toFloat())
+            .putInt("splitCount", split.count)
             .apply()
     }
 
@@ -178,6 +253,12 @@ data class OutputChoice(
                 manualBitrate = p.getFloat("manualBitrate", d.manualBitrate.toFloat()).toDouble(),
                 manualHevc = p.getBoolean("manualHevc", d.manualHevc),
                 targetMB = p.getFloat("targetMB", d.targetMB.toFloat()).toDouble(),
+                split = SplitSettings(
+                    enabled = p.getBoolean("splitEnabled", d.split.enabled),
+                    mode = runCatching { SplitMode.valueOf(p.getString("splitMode", null)!!) }.getOrDefault(d.split.mode),
+                    minutes = p.getFloat("splitMinutes", d.split.minutes.toFloat()).toDouble(),
+                    count = p.getInt("splitCount", d.split.count),
+                ),
             )
         }
 
@@ -224,6 +305,15 @@ object TimeText {
         val f = cs % 100
         return if (h > 0) String.format("%d:%02d:%02d.%02d", h, m, s, f)
         else String.format("%d:%02d.%02d", m, s, f)
+    }
+
+    /** 「15:00」或「1:02:03」（四舍五入到秒，用在说明文字里） */
+    fun short(seconds: Double): String {
+        val total = max(0.0, seconds).roundToInt()
+        val h = total / 3600
+        val m = (total / 60) % 60
+        val s = total % 60
+        return if (h > 0) String.format("%d:%02d:%02d", h, m, s) else String.format("%d:%02d", m, s)
     }
 
     fun fileStamp(seconds: Double): String {

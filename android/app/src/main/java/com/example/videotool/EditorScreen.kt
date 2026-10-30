@@ -16,6 +16,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -266,7 +267,7 @@ fun EditorScreen(model: EditorModel, dim: Boolean, onDimChange: (Boolean) -> Uni
             }
 
             OutputSettingsSection(
-                header = "3. 输出", choice = choice, allowVideo = model.hasVideo,
+                header = "3. 输出", splitHeader = "4. 分割", choice = choice, allowVideo = model.hasVideo,
                 source = model.info?.video, seconds = model.selectedLength, isBatch = false,
                 enabled = !exporting, onChange = { choice = it },
             )
@@ -293,10 +294,11 @@ fun EditorScreen(model: EditorModel, dim: Boolean, onDimChange: (Boolean) -> Uni
                             enabled = model.rangeProblem == null,
                             modifier = Modifier.fillMaxWidth(),
                         ) {
+                            val split = if (choice.split.enabled) "并分割" else ""
                             Text(when (f) {
-                                OutputFormat.VIDEO -> "✂ 开始截取"
-                                OutputFormat.COMPRESSED -> "开始压缩"
-                                else -> "开始转换"
+                                OutputFormat.VIDEO -> if (choice.split.enabled) "✂ 开始分割" else "✂ 开始截取"
+                                OutputFormat.COMPRESSED -> "开始压缩$split"
+                                else -> "开始转换$split"
                             })
                         }
                     }
@@ -307,12 +309,40 @@ fun EditorScreen(model: EditorModel, dim: Boolean, onDimChange: (Boolean) -> Uni
         }
 
         when (val status = job?.status) {
-            is JobStatus.Done -> FormSection(header = "完成", footer = "文件也在右上角「已导出」里。") {
-                Text("✓ ${status.file.name}", color = Green)
-                Caption(Storage.sizeText(status.file))
-                status.note?.let { Caption(it) }
-                FileActions(status.file) { resultMessage = it }
-                resultMessage?.let { Caption(it) }
+            is JobStatus.Done -> if (status.files.size == 1) {
+                val file = status.files[0]
+                FormSection(header = "完成", footer = "文件也在右上角「已导出」里。") {
+                    Text("✓ ${file.name}", color = Green)
+                    Caption(Storage.sizeText(file))
+                    status.note?.let { Caption(it) }
+                    FileActions(file) { resultMessage = it }
+                    resultMessage?.let { Caption(it) }
+                }
+            } else {
+                FormSection(header = "完成", footer = "每一段可以单独复制、分享。文件也在右上角「已导出」里。") {
+                    Text("✓ 分成了 ${status.files.size} 段 · 一共 ${Storage.totalSizeText(status.files)}", color = Green)
+                    status.note?.let { Caption(it) }
+                    status.files.forEachIndexed { i, file ->
+                        if (i > 0) HorizontalDivider()
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(Modifier.weight(1f)) {
+                                Text(file.name, style = MaterialTheme.typography.bodyMedium, maxLines = 2)
+                                Caption(Storage.sizeText(file))
+                            }
+                            TextButton(onClick = {
+                                resultMessage = if (Storage.copyToClipboard(context, file)) "已复制「${file.name}」，可以去别的 App 粘贴" else "复制失败"
+                            }) { Text("复制") }
+                            TextButton(onClick = { Storage.share(context, file) }) { Text("分享") }
+                        }
+                    }
+                    OutlinedButton(onClick = { Storage.shareAll(context, status.files) }, modifier = Modifier.fillMaxWidth()) {
+                        Text("全部分享 / 存到其他 App")
+                    }
+                    OutlinedButton(onClick = { resultMessage = Storage.saveAllToGallery(context, status.files) }, modifier = Modifier.fillMaxWidth()) {
+                        Text(if (status.files.all { Storage.isAudio(it) }) "全部存到「音乐」" else "全部存到相册")
+                    }
+                    resultMessage?.let { Caption(it) }
+                }
             }
             is JobStatus.Failed -> FormSection { Text("⚠ ${status.message}", color = Orange) }
             else -> {}

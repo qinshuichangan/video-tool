@@ -8,11 +8,13 @@ struct OutputChoice: Sendable {
     var compressMode: CompressMode
     var manual: CompressSettings
     var targetMB: Double
+    var split: SplitSettings
 
     /// 读取当前保存的设置（默认值要和 OutputSettingsSection 里的 @AppStorage 一致）
     static func current() -> OutputChoice {
         let d = UserDefaults.standard
         func value<T>(_ key: String, _ fallback: T) -> T { d.object(forKey: key) as? T ?? fallback }
+        let defaults = SplitSettings()
         return OutputChoice(
             format: OutputFormat(rawValue: value(EditorModel.formatKey, "")) ?? .video,
             audioBitrate: value(EditorModel.bitrateKey, 192),
@@ -22,7 +24,12 @@ struct OutputChoice: Sendable {
                                      fps: value(EditorModel.compressFPSKey, 30),
                                      bitrateMbps: value(EditorModel.compressBitrateKey, 3.0),
                                      hevc: value(EditorModel.compressHEVCKey, true)),
-            targetMB: value(EditorModel.compressTargetKey, 30.0))
+            targetMB: value(EditorModel.compressTargetKey, 30.0),
+            split: SplitSettings(
+                enabled: value(SplitSettings.enabledKey, defaults.enabled),
+                mode: SplitMode(rawValue: value(SplitSettings.modeKey, "")) ?? defaults.mode,
+                minutes: value(SplitSettings.minutesKey, defaults.minutes),
+                count: value(SplitSettings.countKey, defaults.count)))
     }
 
     /// 只有声音的文件没法输出视频，自动换成 MP3
@@ -50,9 +57,10 @@ struct OutputChoice: Sendable {
     }
 }
 
-/// 「输出」设置区块
+/// 「输出」设置区块 + 「分割」设置区块
 struct OutputSettingsSection: View {
     let header: String
+    let splitHeader: String
     /// 有画面的文件才能选视频格式（批量时传 true）
     let allowVideo: Bool
     /// 单个文件时用来显示自动设置和预计大小；批量时为 nil
@@ -69,6 +77,10 @@ struct OutputSettingsSection: View {
     @AppStorage(EditorModel.compressHEVCKey) private var compressHEVC = true
     @AppStorage(EditorModel.compressModeKey) private var compressMode: CompressMode = .lecture
     @AppStorage(EditorModel.compressTargetKey) private var targetMB = 30.0
+    @AppStorage(SplitSettings.enabledKey) private var splitEnabled = false
+    @AppStorage(SplitSettings.modeKey) private var splitMode: SplitMode = .minutes
+    @AppStorage(SplitSettings.minutesKey) private var splitMinutes = 15.0
+    @AppStorage(SplitSettings.countKey) private var splitCount = 3
 
     private var isBatch: Bool { source == nil && seconds == nil }
 
@@ -81,10 +93,19 @@ struct OutputSettingsSection: View {
         OutputChoice(format: format, audioBitrate: bitrate, precise: precise, compressMode: compressMode,
                      manual: CompressSettings(shortSide: compressSide, fps: compressFPS,
                                               bitrateMbps: compressBitrate, hevc: compressHEVC),
-                     targetMB: targetMB)
+                     targetMB: targetMB,
+                     split: SplitSettings(enabled: splitEnabled, mode: splitMode,
+                                          minutes: splitMinutes, count: splitCount))
     }
 
     var body: some View {
+        Group {
+            outputSection
+            splitSection
+        }
+    }
+
+    private var outputSection: some View {
         Section {
             Picker("格式", selection: $format) {
                 ForEach(availableFormats) { f in
@@ -202,6 +223,113 @@ struct OutputSettingsSection: View {
                 estimateText
             }
             Toggle("HEVC 编码（体积更小）", isOn: $compressHEVC)
+        }
+    }
+
+    // MARK: 分割
+
+    private var splitSection: some View {
+        Section {
+            Toggle(isOn: $splitEnabled) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(splitTitle)
+                    Text("切成几个小文件，方便一段一段上传或发送")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if splitEnabled {
+                Picker("分割方式", selection: $splitMode) {
+                    ForEach(SplitMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+
+                switch splitMode {
+                case .minutes:
+                    HStack {
+                        Text("每段长度")
+                        Spacer()
+                        TextField("15", value: $splitMinutes, format: .number)
+                            .keyboardType(.decimalPad)
+                            .multilineTextAlignment(.trailing)
+                            .monospacedDigit()
+                            .frame(width: 80)
+                            .focused(targetFocus)
+                        Text("分钟")
+                    }
+                case .count:
+                    Stepper(value: $splitCount, in: 2...SplitSettings.maxParts) {
+                        HStack {
+                            Text("分成")
+                            Spacer()
+                            Text("\(splitCount) 段").monospacedDigit()
+                        }
+                    }
+                }
+                splitPlan
+            }
+        } header: {
+            Text(splitHeader)
+        } footer: {
+            Text(splitFooter)
+        }
+    }
+
+    /// 压缩时叫「压缩后自动分割」，其它格式按各自的说法
+    private var splitTitle: String {
+        switch format {
+        case .video: return "分割成几段"
+        case .compressed: return "压缩后自动分割"
+        default: return "转换后自动分割"
+        }
+    }
+
+    /// 会分成几段、每段多长、每段大概多大
+    @ViewBuilder
+    private var splitPlan: some View {
+        if isBatch {
+            Text(splitMode == .minutes
+                 ? "每个文件分别按自己的长度来分，不够 \(TimeText.short(max(splitMinutes, 0.1) * 60)) 的文件不分。"
+                 : "每个文件都平均分成 \(splitCount) 段。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else if let seconds, seconds > 0 {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(choice.split.summary(seconds: seconds)).font(.caption)
+                if let size = segmentSizeText(seconds: seconds) {
+                    Text(size).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private func segmentSizeText(seconds: Double) -> String? {
+        let parts = choice.split.parts(start: 0, end: seconds)
+        guard parts.count > 1, let longest = parts.map(\.length).max() else { return nil }
+        let mb: Double
+        switch format {
+        case .video: return nil   // 不重新编码，大小跟着原视频走
+        case .compressed: mb = settings.estimatedMB(seconds: longest)
+        default: mb = Double(bitrate) * longest / 8 / 1000
+        }
+        return String(format: "每段预计最大约 %.1f MB", mb)
+    }
+
+    private var splitFooter: String {
+        guard splitEnabled else {
+            return "打开后，处理完会按设置切成几个文件，文件名后面加「_第1段」「_第2段」…，按名字排序就是顺序。"
+        }
+        switch format {
+        case .video:
+            return precise
+                ? "每段都重新编码，切点精确到帧，比较慢。"
+                : "不重新编码，很快、画质无损。每段开头从最近的关键帧开始，相邻两段可能会有一两秒重叠，不会漏掉内容；介意的话在上面打开「精确剪切」。"
+        case .compressed:
+            return "按上面的压缩设置处理，再切成几段，每段都能单独播放。压缩设置按整段的长度来算，所以「目标大小」是所有段加起来的大小。"
+        default:
+            return "每段分别转成音频，可以一段一段发给 Claude 转写。文件名后面会加「_第1段」「_第2段」…"
         }
     }
 

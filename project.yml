@@ -57,8 +57,8 @@ targets:
         CFBundleDisplayName: 剪辑转换
         CFBundleDevelopmentRegion: zh-Hans
         CFBundleLocalizations: [zh-Hans]
-        CFBundleShortVersionString: "1.32"
-        CFBundleVersion: "6"
+        CFBundleShortVersionString: "1.42"
+        CFBundleVersion: "7"
         UILaunchScreen: {}
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true

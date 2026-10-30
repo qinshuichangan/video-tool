@@ -116,6 +116,18 @@ object Storage {
         context.startActivity(Intent.createChooser(intent, "分享 / 存到其他 App").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
     }
 
+    /** 一次分享好几个文件（分割的结果） */
+    fun shareAll(context: Context, files: List<File>) {
+        if (files.size == 1) return share(context, files[0])
+        val uris = ArrayList(files.map { uriFor(context, it) })
+        val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+            type = if (files.all { isAudio(it) }) "audio/*" else if (files.none { isAudio(it) }) "video/*" else "*/*"
+            putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        context.startActivity(Intent.createChooser(intent, "分享 / 存到其他 App").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+    }
+
     fun copyToClipboard(context: Context, file: File): Boolean = runCatching {
         val cm = context.getSystemService(ClipboardManager::class.java)
         cm.setPrimaryClip(ClipData.newUri(context.contentResolver, file.name, uriFor(context, file)))
@@ -144,6 +156,23 @@ object Storage {
         resolver.update(uri, values, null, null)
         if (audio) "已存到「音乐/剪辑转换」" else "已存到相册（影片/剪辑转换）"
     }.getOrElse { "保存失败：${it.message}" }
+
+    /** 几个文件一起存（分割的结果） */
+    fun saveAllToGallery(context: Context, files: List<File>): String {
+        if (files.size == 1) return saveToGallery(context, files[0])
+        var last = ""
+        files.forEachIndexed { i, file ->
+            last = saveToGallery(context, file)
+            if (last.startsWith("保存失败")) return if (i > 0) "已存 $i 个，$last" else last
+        }
+        return last + "（共 ${files.size} 个）"
+    }
+
+    fun totalSizeText(files: List<File>): String {
+        val bytes = files.sumOf { it.length() }.toDouble()
+        return if (bytes >= 1024 * 1024 * 1024) String.format("%.2f GB", bytes / 1024 / 1024 / 1024)
+        else String.format("%.1f MB", bytes / 1024 / 1024)
+    }
 
     /** 剪贴板里的音频 / 视频 */
     fun clipboardMediaUri(context: Context): Uri? {

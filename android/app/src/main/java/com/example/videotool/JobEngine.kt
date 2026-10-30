@@ -26,14 +26,17 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToLong
 
 enum class JobKind { SINGLE, BATCH }
 
 sealed class JobStatus {
     data object Waiting : JobStatus()
     data class Running(val progress: Double) : JobStatus()
-    /** note：自动另存的结果（例：「已存到相册（影片/剪辑转换）」） */
-    data class Done(val file: File, val note: String? = null) : JobStatus()
+    /** files：分割时有好几个。note：自动另存的结果（例：「已存到相册（影片/剪辑转换）」） */
+    data class Done(val files: List<File>, val note: String? = null) : JobStatus()
     data class Failed(val message: String) : JobStatus()
 }
 
@@ -161,11 +164,11 @@ object JobEngine {
                 val result = runCatching { process(next) }
                 when {
                     result.isSuccess -> {
-                        val file = result.getOrThrow()
+                        val files = result.getOrThrow()
                         // 自动另存一份到公共的「影片 / 音乐」文件夹：卸载 App 后文件也还在
                         val note = if (OutputChoice.autoSaveEnabled(app))
-                            withContext(Dispatchers.IO) { Storage.saveToGallery(app, file) } else null
-                        setStatus(next.id, JobStatus.Done(file, note))
+                            withContext(Dispatchers.IO) { Storage.saveAllToGallery(app, files) } else null
+                        setStatus(next.id, JobStatus.Done(files, note))
                         if (next.kind == JobKind.BATCH) { Storage.deleteImport(next.input); batchDone++ }
                     }
                     result.exceptionOrNull() is CancellationException -> {
@@ -204,7 +207,7 @@ object JobEngine {
     private fun disarm(id: Long) =
         _jobs.update { list -> list.map { if (it.id == id) it.copy(armed = false) else it } }
 
-    private suspend fun process(job: Job): File {
+    private suspend fun process(job: Job): List<File> {
         val context = app
         val choice = job.choice ?: OutputChoice.load(context)
         setStatus(job.id, JobStatus.Running(0.0))
@@ -218,23 +221,47 @@ object JobEngine {
                 val format = choice.formatFor(info.hasVideo)
                 if (format.isAudio && !info.hasAudio) throw AppError("这个文件里没有声音")
 
+                val startSec = job.range.startMs / 1000.0
                 val endSec = job.range.endMs?.let { it / 1000.0 } ?: info.durationSec
-                val seconds = endSec - job.range.startMs / 1000.0
+                val seconds = endSec - startSec
                 val name = if (format == OutputFormat.COMPRESSED) job.name + "_压缩" else job.name
-                val output = Storage.outputFile(context, name, job.range, endSec, format.ext)
-                val report: (Double) -> Unit = { p -> onProgress(job, p) }
+                val source = info.video
+                if (format == OutputFormat.COMPRESSED && source == null) throw AppError("读不出视频的分辨率")
+                // 压缩设置按整段的长度算（「目标大小」= 所有段加起来的大小）
+                val compress = source?.let { choice.compressSettings(it, seconds) }
 
-                when (format) {
-                    OutputFormat.VIDEO ->
-                        Exporter.trimVideo(context, job.input, job.range, choice.precise, output, report)
-                    OutputFormat.COMPRESSED -> {
-                        val source = info.video ?: throw AppError("读不出视频的分辨率")
-                        Exporter.compressVideo(context, job.input, job.range,
-                            choice.compressSettings(source, seconds), source, output, report)
+                // 分割：一段一段做，进度按长度算总的
+                val parts = choice.split.parts(startSec, endSec)
+                val total = max(seconds, 0.001)
+                var finished = 0.0
+                val outputs = mutableListOf<File>()
+                try {
+                    parts.forEachIndexed { i, part ->
+                        val last = i == parts.size - 1
+                        val range = if (parts.size == 1) job.range
+                        else ClipRange((part.start * 1000).roundToLong(), if (last) job.range.endMs else (part.end * 1000).roundToLong())
+                        val partName = if (parts.size > 1) SplitSettings.partName(name, i, parts.size) else name
+                        val output = Storage.outputFile(context, partName, range, part.end, format.ext)
+                        val base = finished
+                        val length = part.length
+                        val report: (Double) -> Unit = { p -> onProgress(job, min((base + p * length) / total, 1.0)) }
+
+                        when (format) {
+                            OutputFormat.VIDEO ->
+                                Exporter.trimVideo(context, job.input, range, choice.precise, output, report)
+                            OutputFormat.COMPRESSED ->
+                                Exporter.compressVideo(context, job.input, range, compress!!, source!!, output, report)
+                            else -> Exporter.convertAudio(context, job.input, range, format, choice.audioBitrate, output, report)
+                        }
+                        outputs += output
+                        finished += length
                     }
-                    else -> Exporter.convertAudio(context, job.input, job.range, format, choice.audioBitrate, output, report)
+                } catch (e: Throwable) {
+                    // 中途失败或取消：已经做好的几段也删掉，重新开始不会重复
+                    outputs.forEach { it.delete() }
+                    throw e
                 }
-                output
+                outputs.toList()
             }
         } finally {
             currentId = null

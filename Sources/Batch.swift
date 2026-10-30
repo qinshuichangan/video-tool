@@ -27,7 +27,7 @@ final class BatchModel: ObservableObject {
     enum Status: Equatable {
         case waiting
         case running(Double)
-        case done(URL)
+        case done([URL])     // 分割时有好几个文件
         case failed(String)
     }
 
@@ -55,7 +55,7 @@ final class BatchModel: ObservableObject {
 
     private var choice: OutputChoice?
     private var runTask: Task<Void, Never>?
-    private var currentExport: Task<URL, Error>?
+    private var currentExport: Task<[URL], Error>?
     private var stopReason = StopReason.none
     private var resumeWhenActive = false
     private var runDone = 0
@@ -183,8 +183,8 @@ final class BatchModel: ObservableObject {
             setStatus(item.id, .running(0))
             let mark = WorkSession.shared.backgroundCount
             do {
-                let output = try await convert(item, choice: choice)
-                setStatus(item.id, .done(output))
+                let outputs = try await convert(item, choice: choice)
+                setStatus(item.id, .done(outputs))
                 deleteImport(item)
                 runDone += 1
             } catch {
@@ -234,7 +234,7 @@ final class BatchModel: ObservableObject {
         WorkSession.shared.update(progress: overallProgress)
     }
 
-    private func convert(_ item: Item, choice: OutputChoice) async throws -> URL {
+    private func convert(_ item: Item, choice: OutputChoice) async throws -> [URL] {
         let asset = AVURLAsset(url: item.url)
         let duration = try await asset.load(.duration).seconds
         let videoTracks = try await asset.loadTracks(withMediaType: .video)
@@ -249,30 +249,19 @@ final class BatchModel: ObservableObject {
             ? nil
             : await EditorModel.describeVideo(videoTracks.first, file: item.url).video
         let compress = choice.compressSettings(source: source, seconds: duration)
-        let range = CMTimeRange(start: .zero, duration: CMTime(seconds: duration, preferredTimescale: 600))
         let name = format == .compressed ? item.name + "_压缩" : item.name
-        let output = EditorModel.outputURL(name: name, start: 0, end: duration, full: true,
-                                           ext: format.fileExtension)
+        let segments = Exporter.segments(base: name, start: 0, end: duration, fullFile: true,
+                                         split: choice.split, ext: format.fileExtension)
+        let job = Exporter.Job(format: format, precise: choice.precise,
+                               audioBitrate: choice.audioBitrate, compress: compress)
         let source0 = item.url
-        let precise = choice.precise
-        let bitrate = choice.audioBitrate
         let id = item.id
         let report: @Sendable (Double) -> Void = { [weak self] value in
             Task { @MainActor in self?.progressChanged(id, value) }
         }
 
-        let task = Task.detached(priority: .userInitiated) { () async throws -> URL in
-            switch format {
-            case .video:
-                return try await Exporter.trimVideo(source: source0, range: range, precise: precise,
-                                                    output: output, progress: report)
-            case .compressed:
-                return try await Exporter.compressVideo(source: source0, range: range, settings: compress,
-                                                        output: output, progress: report)
-            default:
-                return try await Exporter.convertAudio(source: source0, range: range, format: format,
-                                                       bitrate: bitrate, output: output, progress: report)
-            }
+        let task = Task.detached(priority: .userInitiated) { () async throws -> [URL] in
+            try await Exporter.run(job, source: source0, segments: segments, progress: report)
         }
         currentExport = task
         if stopReason != .none { task.cancel() }
@@ -295,7 +284,8 @@ struct BatchView: View {
         Form {
             addSection
             queueSection
-            OutputSettingsSection(header: "3. 输出（所有文件共用）", allowVideo: true,
+            OutputSettingsSection(header: "3. 输出（所有文件共用）", splitHeader: "4. 分割（所有文件共用）",
+                                  allowVideo: true,
                                   source: nil, seconds: nil, targetFocus: $targetFocused)
                 .disabled(batch.isRunning)
             runSection
@@ -346,7 +336,7 @@ struct BatchView: View {
         } header: {
             Text("1. 添加文件")
         } footer: {
-            Text("批量处理是整段转换，不剪。处理完的原文件副本会自动删掉，不占空间。")
+            Text("批量处理是整段转换，不剪（可以在「4. 分割」里设置切成几段）。处理完的原文件副本会自动删掉，不占空间。")
         }
     }
 
@@ -391,13 +381,16 @@ struct BatchView: View {
             case .running(let p):
                 ProgressView(value: p)
                 Text("处理中 \(Int(p * 100))%").font(.caption).foregroundStyle(.secondary)
-            case .done(let url):
+            case .done(let urls):
                 HStack {
-                    Label("完成 · \(LibraryView.sizeText(url))", systemImage: "checkmark.circle.fill")
+                    Label(urls.count > 1
+                          ? "完成 · 分成 \(urls.count) 段 · \(LibraryView.totalSizeText(urls))"
+                          : "完成 · \(LibraryView.totalSizeText(urls))",
+                          systemImage: "checkmark.circle.fill")
                         .font(.caption)
                         .foregroundStyle(.green)
                     Spacer()
-                    ShareLink(item: url) {
+                    ShareLink(items: urls) {
                         Image(systemName: "square.and.arrow.up")
                     }
                     .buttonStyle(.borderless)

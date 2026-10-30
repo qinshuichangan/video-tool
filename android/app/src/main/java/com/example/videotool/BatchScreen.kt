@@ -71,7 +71,7 @@ fun BatchScreen(dim: Boolean, onDimChange: (Boolean) -> Unit, requestNotificatio
     val failed = items.count { it.status is JobStatus.Failed }
 
     Column {
-        FormSection(header = "1. 添加文件", footer = "批量处理是整段转换，不剪。处理完的原文件副本会自动删掉，不占空间。") {
+        FormSection(header = "1. 添加文件", footer = "批量处理是整段转换，不剪（可以在「4. 分割」里设置切成几段）。处理完的原文件副本会自动删掉，不占空间。") {
             FilledTonalButton(
                 onClick = { pickPhotos.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.VideoOnly)) },
                 enabled = !running, modifier = Modifier.fillMaxWidth(),
@@ -105,7 +105,7 @@ fun BatchScreen(dim: Boolean, onDimChange: (Boolean) -> Unit, requestNotificatio
         }
 
         OutputSettingsSection(
-            header = "3. 输出（所有文件共用）", choice = choice, allowVideo = true, source = null, seconds = null,
+            header = "3. 输出（所有文件共用）", splitHeader = "4. 分割（所有文件共用）", choice = choice, allowVideo = true, source = null, seconds = null,
             isBatch = true, enabled = !running, onChange = { choice = it },
         )
 
@@ -149,9 +149,10 @@ private fun BatchRow(item: Job) {
             }
             is JobStatus.Done -> {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("✓ 完成 · ${Storage.sizeText(s.file)}", color = Green, style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.weight(1f))
-                    TextButton(onClick = { Storage.share(context, s.file) }) { Text("分享") }
+                    val text = if (s.files.size > 1) "✓ 完成 · 分成 ${s.files.size} 段 · ${Storage.totalSizeText(s.files)}"
+                    else "✓ 完成 · ${Storage.totalSizeText(s.files)}"
+                    Text(text, color = Green, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                    TextButton(onClick = { Storage.shareAll(context, s.files) }) { Text(if (s.files.size > 1) "全部分享" else "分享") }
                 }
                 s.note?.let { Caption(it) }
             }
