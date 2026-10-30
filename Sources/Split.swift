@@ -51,26 +51,33 @@ struct SplitSettings: Sendable, Equatable {
         guard enabled, total > 1 else { return [Part(start: start, end: end)] }
 
         var n: Int
+        var step: Double
         switch mode {
         case .minutes:
             n = rawMinuteCount(total)
-            if n <= Self.maxParts {
-                let step = max(minutes, 0.1) * 60
-                return (0..<n).map { i in
-                    Part(start: start + Double(i) * step,
-                         end: i == n - 1 ? end : start + Double(i + 1) * step)
-                }
+            step = max(minutes, 0.1) * 60
+            if n > Self.maxParts {
+                n = Self.maxParts    // 太多了：改成平均分 99 段
+                step = total / Double(n)
             }
-            n = Self.maxParts    // 太多了：改成平均分 99 段
         case .count:
-            n = count
+            let longest = max(Int(total), 1)          // 每段至少 1 秒
+            n = min(max(count, 1), Self.maxParts)
+            n = min(n, longest)
+            step = total / Double(n)
         }
-        n = min(max(n, 1), Self.maxParts, max(Int(total), 1))   // 每段至少 1 秒
-        let step = total / Double(n)
-        return (0..<n).map { i in
-            Part(start: start + step * Double(i),
-                 end: i == n - 1 ? end : start + step * Double(i + 1))
+        return Self.cut(start: start, end: end, count: n, step: step)
+    }
+
+    /// 从 start 开始每 step 秒切一刀，一共 count 段，最后一段一直到 end
+    private static func cut(start: Double, end: Double, count: Int, step: Double) -> [Part] {
+        var list: [Part] = []
+        for i in 0..<count {
+            let from: Double = start + Double(i) * step
+            let to: Double = (i == count - 1) ? end : start + Double(i + 1) * step
+            list.append(Part(start: from, end: to))
         }
+        return list
     }
 
     /// 例：「会分成 3 段：每段 15:00，最后一段 12:31」
